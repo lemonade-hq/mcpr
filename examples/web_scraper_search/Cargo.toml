@@ -1,0 +1,30 @@
+[package]
+name = "mcpr-web-scraper-search"
+version = "0.1.0"
+edition = "2021"
+description = "MCP web scraper search example"
+authors = ["Chetan Conikee"]
+license = "MIT"
+
+[[bin]]
+name = "web-scraper-search-server"
+path = "src/server.rs"
+
+[[bin]]
+name = "web-scraper-search-client"
+path = "src/client.rs"
+
+[dependencies]
+mcpr = { path = "../.." }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+tokio = { version = "1.35", features = ["full"] }
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+url = "2.2.2"
+scraper = "0.18.1"
+anthropic = "0.0.8"
+tempfile = "3.8.1"
