@@ -35,6 +35,21 @@ enum Commands {
         output: String,
     },
 
+    /// Generate a complete "hello mcp" project with both client and server
+    GenerateProject {
+        /// Name of the project
+        #[arg(short, long)]
+        name: String,
+
+        /// Output directory
+        #[arg(short, long, default_value = ".")]
+        output: String,
+
+        /// Transport type to use (stdio, sse, websocket)
+        #[arg(short, long, default_value = "stdio")]
+        transport: String,
+    },
+
     /// Run a server
     RunServer {
         /// Path to the server implementation
@@ -85,6 +100,28 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("Error generating client stub: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::GenerateProject {
+            name,
+            output,
+            transport,
+        } => {
+            println!(
+                "Generating complete 'hello mcp' project '{}' in '{}'",
+                name, output
+            );
+            println!("Using transport type: {}", transport);
+
+            let output_path = PathBuf::from(output);
+            match mcpr::generator::generate_project(name, &output_path, transport) {
+                Ok(_) => {
+                    println!("Complete 'hello mcp' project generated successfully!");
+                }
+                Err(e) => {
+                    eprintln!("Error generating complete 'hello mcp' project: {}", e);
                     std::process::exit(1);
                 }
             }

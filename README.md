@@ -1,197 +1,270 @@
-# Model Context Protocol (MCP) for Rust
+# MCPR - Model Context Protocol for Rust
 
-A Rust implementation of [Anthropic's Model Context Protocol (MCP)](https://www.anthropic.com/news/model-context-protocol), an open standard for connecting AI assistants to data sources and tools.
+A Rust implementation of Anthropic's [Model Context Protocol (MCP)](https://docs.anthropic.com/claude/docs/model-context-protocol), an open standard for connecting AI assistants to data sources and tools.
 
-## Overview
+## Features
 
-This project provides:
-
-1. A complete Rust implementation of the MCP schema
-2. Tools for generating server and client stubs
-3. Transport layer implementations for different communication methods
-4. CLI utilities for working with MCP
-5. Comprehensive examples demonstrating various MCP use cases
+- **Schema Definitions**: Complete implementation of the MCP schema
+- **Transport Layer**: Multiple transport options including stdio, SSE, and WebSocket (all tested and working)
+- **High-Level Client/Server**: Easy-to-use client and server implementations
+- **CLI Tools**: Generate server and client stubs
+- **Project Generator**: Quickly scaffold new MCP projects
 
 ## Installation
 
-```bash
-# Install from crates.io
-cargo install mcpr
+Add MCPR to your `Cargo.toml`:
 
-# Or build from source
-git clone https://github.com/conikeec/mcpr.git
-cd mcpr
-cargo install --path .
+```toml
+[dependencies]
+mcpr = "0.2.0"
+```
+
+For CLI tools, install globally:
+
+```bash
+cargo install mcpr
 ```
 
 ## Usage
 
-Once installed, you can use the `mcpr` command-line tool to generate MCP server and client stubs, run servers, connect to servers, and validate MCP messages.
+### High-Level Client
 
-### Generate a Server Stub
-
-```bash
-mcpr generate-server --name my-server --output ./my-server
-```
-
-This will create a new directory `./my-server/my-server` with a basic MCP server implementation that you can customize.
-
-### Generate a Client Stub
-
-```bash
-mcpr generate-client --name my-client --output ./my-client
-```
-
-This will create a new directory `./my-client/my-client` with a basic MCP client implementation that you can customize.
-
-### Run a Server
-
-```bash
-mcpr run-server --path ./my-server
-```
-
-### Connect to a Server
-
-```bash
-mcpr connect --uri stdio://./my-server
-```
-
-### Validate an MCP Message
-
-```bash
-mcpr validate --path ./message.json
-```
-
-## Library Usage
+The high-level client provides a simple interface for communicating with MCP servers:
 
 ```rust
-use mcpr::schema::{JSONRPCMessage, InitializeRequest, ClientCapabilities};
-use mcpr::transport::stdio::StdioTransport;
-
-// Create a client
-let mut client = StdioTransport::new();
-
-// Send an initialize request
-let request = InitializeRequest {
-    method: "initialize".to_string(),
-    params: InitializeParams {
-        protocol_version: "2024-11-05".to_string(),
-        capabilities: ClientCapabilities::default(),
-        client_info: Implementation {
-            name: "my-client".to_string(),
-            version: "0.1.0".to_string(),
-        },
-    },
+use mcpr::{
+    client::Client,
+    transport::stdio::StdioTransport,
 };
 
-// Send the request
-client.send(&request).await?;
+// Create a client with stdio transport
+let transport = StdioTransport::new();
+let mut client = Client::new(transport);
 
-// Receive the response
-let response = client.receive().await?;
+// Initialize the client
+client.initialize()?;
+
+// Call a tool
+let request = MyToolRequest { /* ... */ };
+let response: MyToolResponse = client.call_tool("my_tool", &request)?;
+
+// Shutdown the client
+client.shutdown()?;
 ```
 
-## Examples
+### High-Level Server
 
-This repository includes several examples demonstrating different aspects of the MCP protocol:
+The high-level server makes it easy to create MCP-compatible servers:
 
-### Simple Examples
+```rust
+use mcpr::{
+    server::{Server, ServerConfig},
+    transport::stdio::StdioTransport,
+    Tool,
+};
 
-Basic examples showing the core MCP protocol functionality:
+// Configure the server
+let server_config = ServerConfig::new()
+    .with_name("My MCP Server")
+    .with_version("1.0.0")
+    .with_tool(Tool {
+        name: "my_tool".to_string(),
+        description: "My awesome tool".to_string(),
+        parameters_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                // Tool parameters schema
+            },
+            "required": ["param1", "param2"]
+        }),
+    });
+
+// Create the server
+let mut server = Server::new(server_config);
+
+// Register tool handlers
+server.register_tool_handler("my_tool", |params| {
+    // Parse parameters and handle the tool call
+    // ...
+    Ok(serde_json::to_value(response)?)
+})?;
+
+// Start the server with stdio transport
+let transport = StdioTransport::new();
+server.start(transport)?;
+```
+
+## Creating MCP Projects
+
+MCPR includes a project generator to quickly scaffold new MCP projects with different transport types.
+
+### Using the CLI
 
 ```bash
-# Run the simple server
-cargo run --example simple_server
+# Generate a project with stdio transport
+mcpr generate --name my-stdio-project --transport stdio
 
-# Run the simple client
-cargo run --example simple_client
+# Generate a project with SSE transport
+mcpr generate --name my-sse-project --transport sse
+
+# Generate a project with WebSocket transport
+mcpr generate --name my-websocket-project --transport websocket
 ```
 
-See [examples/simple/README.md](examples/simple/README.md) for more details.
+### Project Structure
 
-### Browser Search
+Each generated project includes:
 
-Examples demonstrating a browser search tool using MCP:
+```
+my-project/
+├── client/             # Client implementation
+│   ├── src/
+│   │   └── main.rs     # Client code
+│   └── Cargo.toml      # Client dependencies
+├── server/             # Server implementation
+│   ├── src/
+│   │   └── main.rs     # Server code
+│   └── Cargo.toml      # Server dependencies
+├── test.sh             # Combined test script
+├── test_server.sh      # Server-only test script
+├── test_client.sh      # Client-only test script
+└── run_tests.sh        # Script to run all tests
+```
+
+### Building Projects
 
 ```bash
-# Run the browser search server
-cd examples/browser_search
-./run_browser_search.sh
+# Build the server
+cd my-project/server
+cargo build
 
-# Run the browser search client
-cargo run --example browser_search_client
+# Build the client
+cd my-project/client
+cargo build
 ```
 
-See [examples/browser_search/README.md](examples/browser_search/README.md) for more details.
+### Running Projects
 
-### Tool Caller
+#### Stdio Transport
 
-Examples showing how to implement tool calling functionality:
+For stdio transport, you typically run the server and pipe its output to the client:
 
 ```bash
-# Run the LLM tool caller
-cd examples/tool_caller
-./run_llm_tool_caller.sh
-
-# Run the standalone tool caller
-cd examples/tool_caller
-./run_standalone_tool_caller.sh
+# Run the server and pipe to client
+./server/target/debug/my-stdio-project-server | ./client/target/debug/my-stdio-project-client
 ```
 
-See [examples/tool_caller/README.md](examples/tool_caller/README.md) for more details.
-
-### Web Scrape
-
-Examples demonstrating a web scraping tool using MCP:
+Or use the client to connect to the server:
 
 ```bash
-# Run the web scrape server
-cd examples/web_scrape
-./run_web_scrape.sh
+# Run the server in one terminal
+./server/target/debug/my-stdio-project-server
 
-# Run the web scrape client
-cargo run --example web_scrape_client
+# Run the client in another terminal
+./client/target/debug/my-stdio-project-client --uri "stdio://./server/target/debug/my-stdio-project-server"
 ```
 
-See [examples/web_scrape/README.md](examples/web_scrape/README.md) for more details.
+#### SSE Transport
 
-### Direct Web Scraper
-
-A standalone web scraper that doesn't use MCP:
+For SSE transport, you run the server first, then connect with the client:
 
 ```bash
-# Run the direct web scraper
-cd examples/direct_web_scraper
-./run_direct_web_scraper.sh
+# Run the server (default port is 8080)
+./server/target/debug/my-sse-project-server --port 8080
+
+# In another terminal, run the client
+./client/target/debug/my-sse-project-client --uri "http://localhost:8080"
 ```
 
-See [examples/direct_web_scraper/README.md](examples/direct_web_scraper/README.md) for more details.
+#### Interactive Mode
 
-### MCP Web Scraper
-
-Advanced examples showing different ways to implement a web scraper using MCP:
+Clients support an interactive mode for manual testing:
 
 ```bash
-# Run the socket-based MCP web scraper server
-cd examples/mcp_web_scraper
-./run_mcp_web_scraper_socket.sh
-
-# Run the socket-based MCP web scraper client
-cd examples/mcp_web_scraper
-./run_mcp_web_scraper_client.sh
-
-# Run the interactive MCP web scraper
-cd examples/mcp_web_scraper
-./run_interactive_mcp_web_scraper.sh
+./client/target/debug/my-project-client --interactive
 ```
 
-See [examples/mcp_web_scraper/README.md](examples/mcp_web_scraper/README.md) for more details.
+### Running Tests
+
+Each generated project includes test scripts:
+
+```bash
+# Run all tests
+./run_tests.sh
+
+# Run only server tests
+./test_server.sh
+
+# Run only client tests
+./test_client.sh
+
+# Run the combined test (original test script)
+./test.sh
+```
+
+## Transport Options
+
+MCPR supports multiple transport options:
+
+### Stdio Transport
+
+The simplest transport, using standard input/output:
+
+```rust
+use mcpr::transport::stdio::StdioTransport;
+
+let transport = StdioTransport::new();
+```
+
+### SSE Transport
+
+Server-Sent Events transport for web-based applications:
+
+```rust
+use mcpr::transport::sse::SSETransport;
+
+// For server
+let transport = SSETransport::new("http://localhost:8080");
+
+// For client
+let transport = SSETransport::new("http://localhost:8080");
+```
+
+### WebSocket Transport
+
+WebSocket transport for full-duplex communication:
+
+```rust
+use mcpr::transport::websocket::WebSocketTransport;
+
+// For server
+let transport = WebSocketTransport::new("ws://localhost:8080");
+
+// For client
+let transport = WebSocketTransport::new("ws://localhost:8080");
+```
+
+## Debugging
+
+Enable debug logging for detailed information:
+
+```bash
+# Set log level to debug
+RUST_LOG=debug ./server/target/debug/my-project-server
+
+# Capture logs to a file
+RUST_LOG=debug ./server/target/debug/my-project-server > server.log 2>&1
+```
+
+## Contributing
+
+Contributions are welcome! Here are some ways you can contribute:
+
+- Implement additional transport options
+- Add more examples
+- Improve documentation
+- Fix bugs and add features
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgements
-
-- [Anthropic](https://www.anthropic.com/) for creating the Model Context Protocol
-- [Model Context Protocol Specification](https://github.com/modelcontextprotocol/specification) 
+This project is licensed under the MIT License - see the LICENSE file for details. 
