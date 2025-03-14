@@ -53,7 +53,7 @@ edition = "2021"
 description = "MCP server generated from mcpr template"
 
 [dependencies]
-mcpr = "0.1.0"
+mcpr = "0.2.0"
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -137,7 +137,7 @@ edition = "2021"
 description = "MCP client generated from mcpr template"
 
 [dependencies]
-mcpr = "0.1.0"
+mcpr = "0.2.0"
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -548,7 +548,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let transport = SSETransport::new(format!("http://localhost:{}", args.port));
     {{/if}}
     {{#if transport_type == "websocket"}}
-    let transport = WebSocketTransport::new(format!("ws://localhost:{}", args.port));
+    let transport = WebSocketTransport::new(&format!("ws://localhost:{}", args.port));
     {{/if}}
     
     info!("Starting {{name}}-server...");
@@ -566,9 +566,9 @@ description = "MCP server for {{name}} project"
 
 [dependencies]
 # For local development, use path dependency:
-mcpr = { path = "../../../" }
+mcpr = { path = "../../../mcpr" }
 # For production, use version from crates.io:
-# mcpr = "0.1.0"
+# mcpr = "0.2.0"
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -810,7 +810,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     {{/if}}
     {{#if transport_type == "websocket"}}
     info!("Using WebSocket transport with URI: {}", args.uri);
-    let transport = WebSocketTransport::new(args.uri.clone());
+    let transport = WebSocketTransport::new(&args.uri);
     {{/if}}
     
     let mut client = Client::new(transport);
@@ -903,9 +903,9 @@ description = "MCP client for {{name}} project"
 
 [dependencies]
 # For local development, use path dependency:
-mcpr = { path = "../../../" }
+mcpr = { path = "../../../mcpr" }
 # For production, use version from crates.io:
-# mcpr = "0.1.0"
+# mcpr = "0.2.0"
 clap = { version = "4.4", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

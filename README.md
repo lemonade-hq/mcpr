@@ -102,13 +102,13 @@ MCPR includes a project generator to quickly scaffold new MCP projects with diff
 
 ```bash
 # Generate a project with stdio transport
-mcpr generate --name my-stdio-project --transport stdio
+mcpr generate-project --name my-stdio-project --transport stdio
 
 # Generate a project with SSE transport
-mcpr generate --name my-sse-project --transport sse
+mcpr generate-project --name my-sse-project --transport sse
 
 # Generate a project with WebSocket transport
-mcpr generate --name my-websocket-project --transport websocket
+mcpr generate-project --name my-websocket-project --transport websocket
 ```
 
 ### Project Structure
