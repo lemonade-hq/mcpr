@@ -255,13 +255,22 @@ pub const PROJECT_README_STDIO_TEMPLATE: &str = r#"# {{name}} - MCP Project
 
 A complete MCP project with both client and server components, using stdio transport.
 
+## Features
+
+- **Robust Communication**: Reliable stdio transport with proper error handling and timeout management
+- **Multiple Connection Methods**: Connect to an already running server or start a new server process
+- **Interactive Mode**: Choose tools and provide parameters interactively
+- **One-shot Mode**: Run queries directly from the command line
+- **Comprehensive Logging**: Detailed logging for debugging and monitoring
+
 ## Project Structure
 
-- `server/`: The MCP server implementation
 - `client/`: The MCP client implementation
-- `test.sh`: A test script to run both client and server
+- `server/`: The MCP server implementation with tools
 
 ## Building the Project
+
+To build both the client and server:
 
 ```bash
 # Build the server
@@ -275,23 +284,86 @@ cargo build
 
 ## Running the Server
 
+The server can be run in standalone mode:
+
 ```bash
 cd server
 cargo run
 ```
 
-## Running the Client
+## Using the Client
+
+The client can connect to the server in two ways:
+
+### Method 1: Start a new server process
+
+```bash
+cd client
+cargo run -- --name "Your Name"
+```
+
+This will start a new server process and connect to it.
+
+### Method 2: Connect to an already running server
+
+First, start the server in a separate terminal:
+
+```bash
+cd server
+cargo run
+```
+
+Then, in another terminal, run the client with the `--connect` flag:
+
+```bash
+cd client
+cargo run -- --connect --name "Your Name"
+```
+
+### Interactive Mode
+
+To run the client in interactive mode:
 
 ```bash
 cd client
 cargo run -- --interactive
 ```
 
-## Running the Test Script
+This will prompt you for input and display the server's responses.
+
+### Additional Options
+
+- `--debug`: Enable debug logging
+- `--timeout <SECONDS>`: Set the timeout for operations (default: 30 seconds)
+- `--server-cmd <COMMAND>`: Specify a custom server command
+
+## Testing
+
+Run the test script to verify that everything is working correctly:
 
 ```bash
 ./test.sh
 ```
+
+This will run tests for all connection methods.
+
+## Extending the Project
+
+You can extend this project by:
+
+1. Adding more tools to the server
+2. Enhancing the client with additional features
+3. Implementing more sophisticated error handling
+4. Adding authentication and security features
+
+## Troubleshooting
+
+If you encounter issues:
+
+1. Enable debug logging with the `--debug` flag
+2. Check the server and client logs
+3. Verify that the server is running and accessible
+4. Ensure that the stdio pipes are properly connected
 
 ## Available Tools
 

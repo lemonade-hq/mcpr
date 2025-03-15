@@ -2,7 +2,11 @@
 
 A Rust implementation of Anthropic's [Model Context Protocol (MCP)](https://docs.anthropic.com/claude/docs/model-context-protocol), an open standard for connecting AI assistants to data sources and tools.
 
-> **⚠️ IMPORTANT NOTICE**: Version 0.2.0 has been yanked due to critical issues with the SSE transport implementation. Please use version 0.2.1 instead, which includes important fixes for client-server communication, message handling, and template generation. If you're already using 0.2.0, we strongly recommend upgrading to 0.2.1 to avoid potential issues.
+> **⚠️ IMPORTANT NOTICE**: Version 0.2.0 has been yanked due to critical issues with the SSE transport implementation. Please use version 0.2.2 instead, which includes important fixes for client-server communication, message handling, and template generation. If you're already using 0.2.0, we strongly recommend upgrading to 0.2.2 to avoid potential issues.
+
+## Examples
+
+Check out our [GitHub Tools example](examples/github-tools/README.md) for a complete implementation of an MCP client-server application that interacts with GitHub repositories. This example demonstrates how to build a client that can query repository READMEs and search for repositories, with support for multiple servers and client-server disconnection scenarios. It's a great starting point for understanding how to build your own MCP applications.
 
 ## Features
 
@@ -23,7 +27,7 @@ Add MCPR to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mcpr = "0.2.1"  # Make sure to use 0.2.1 or later, as 0.2.0 has been yanked
+mcpr = "0.2.2"  # Make sure to use 0.2.2 or later, as 0.2.0 has been yanked
 ```
 
 For CLI tools, install globally:

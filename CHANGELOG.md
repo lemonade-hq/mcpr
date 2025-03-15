@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2025-03-15
+
+### Added
+- Enhanced GitHub Tools example with improved client-server architecture
+  - Added repository search functionality
+  - Implemented user-friendly interactive mode with colored output
+  - Added progress indicators for operations
+  - Improved error handling and user feedback
+
+### Improved
+- Simplified GitHub Tools example UI
+  - Removed complex terminal UI in favor of a more intuitive interactive mode
+  - Added default values for common operations
+  - Enhanced formatting of search results and query responses
+- Updated documentation
+  - Added comprehensive instructions for running servers in background
+  - Improved explanation of client-server architecture
+  - Added guide for generating and extending MCP templates
+  - Enhanced main README with direct links to examples
+
+### Fixed
+- Client-server disconnect handling in GitHub Tools example
+  - Improved server process management
+  - Enhanced client reconnection capabilities
+  - Better error messages for connection issues
+
 ## [0.2.1] - 2025-03-15
 
 ### Added
