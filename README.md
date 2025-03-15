@@ -5,10 +5,15 @@ A Rust implementation of Anthropic's [Model Context Protocol (MCP)](https://docs
 ## Features
 
 - **Schema Definitions**: Complete implementation of the MCP schema
-- **Transport Layer**: Multiple transport options including stdio, SSE, and WebSocket (all tested and working)
+- **Transport Layer**: Multiple transport options including stdio and SSE
 - **High-Level Client/Server**: Easy-to-use client and server implementations
 - **CLI Tools**: Generate server and client stubs
 - **Project Generator**: Quickly scaffold new MCP projects
+- **Mock Implementations**: Built-in mock transports for testing and development
+
+## Coming Soon
+
+- **WebSocket Transport**: WebSocket transport implementation is planned but not yet implemented
 
 ## Installation
 
@@ -102,13 +107,10 @@ MCPR includes a project generator to quickly scaffold new MCP projects with diff
 
 ```bash
 # Generate a project with stdio transport
-mcpr generate --name my-stdio-project --transport stdio
+mcpr generate-project --name my-stdio-project --transport stdio
 
 # Generate a project with SSE transport
-mcpr generate --name my-sse-project --transport sse
-
-# Generate a project with WebSocket transport
-mcpr generate --name my-websocket-project --transport websocket
+mcpr generate-project --name my-sse-project --transport sse
 ```
 
 ### Project Structure
@@ -166,7 +168,7 @@ Or use the client to connect to the server:
 
 #### SSE Transport
 
-For SSE transport, you run the server first, then connect with the client:
+For SSE transport, you run the server first, then connect with the client. The generated project includes a mock SSE transport implementation for testing:
 
 ```bash
 # Run the server (default port is 8080)
@@ -175,6 +177,22 @@ For SSE transport, you run the server first, then connect with the client:
 # In another terminal, run the client
 ./client/target/debug/my-sse-project-client --uri "http://localhost:8080"
 ```
+
+The SSE transport supports both interactive and one-shot modes:
+
+```bash
+# Interactive mode
+./client/target/debug/my-sse-project-client --interactive
+
+# One-shot mode
+./client/target/debug/my-sse-project-client --name "Your Name"
+```
+
+The mock SSE transport implementation includes:
+- Automatic response generation for initialization
+- Echo-back functionality for tool calls
+- Proper error handling and logging
+- Support for all MCP message types
 
 #### Interactive Mode
 
@@ -230,41 +248,210 @@ let transport = SSETransport::new("http://localhost:8080");
 let transport = SSETransport::new("http://localhost:8080");
 ```
 
-### WebSocket Transport
+### WebSocket Transport (Coming Soon)
 
-WebSocket transport for full-duplex communication:
+WebSocket transport for bidirectional communication is currently under development.
 
-```rust
-use mcpr::transport::websocket::WebSocketTransport;
+## Detailed Testing Guide
 
-// For server
-let transport = WebSocketTransport::new("ws://localhost:8080");
+This section provides comprehensive instructions for generating and testing projects with both stdio and SSE transports.
 
-// For client
-let transport = WebSocketTransport::new("ws://localhost:8080");
+### Generating Projects
+
+When generating projects, make sure to specify the correct transport type and output directory:
+
+```bash
+# Generate a stdio project
+mcpr generate-project --name test-stdio-project --transport stdio --output /tmp
+
+# Generate an SSE project
+mcpr generate-project --name test-sse-project --transport sse --output /tmp
 ```
+
+Note: The `--output` parameter specifies where to create the project directory. If omitted, the project will be created in the current directory.
+
+### Testing Stdio Transport Projects
+
+1. **Build the project**:
+   ```bash
+   cd /tmp/test-stdio-project
+   cd server && cargo build
+   cd ../client && cargo build
+   ```
+
+2. **Run the server and client together**:
+   ```bash
+   cd /tmp/test-stdio-project
+   ./server/target/debug/test-stdio-project-server | ./client/target/debug/test-stdio-project-client
+   ```
+
+   You should see output similar to:
+   ```
+   [INFO] Using stdio transport
+   [INFO] Initializing client...
+   [INFO] Server info: {"protocol_version":"2024-11-05","server_info":{"name":"test-stdio-project-server","version":"1.0.0"},"tools":[{"description":"A simple hello world tool","input_schema":{"properties":{"name":{"description":"Name to greet","type":"string"}},"required":["name"],"type":"object"},"name":"hello"}]}
+   [INFO] Running in one-shot mode with name: Default User
+   [INFO] Calling tool 'hello' with parameters: {"name":"Default User"}
+   [INFO] Received message: Hello, Default User!
+   Hello, Default User!
+   [INFO] Shutting down client
+   [INFO] Client shutdown complete
+   ```
+
+3. **Run with detailed logging**:
+   ```bash
+   RUST_LOG=debug ./server/target/debug/test-stdio-project-server | RUST_LOG=debug ./client/target/debug/test-stdio-project-client
+   ```
+
+4. **Run with a custom name**:
+   ```bash
+   ./server/target/debug/test-stdio-project-server | ./client/target/debug/test-stdio-project-client --name "Your Name"
+   ```
+
+### Testing SSE Transport Projects
+
+1. **Build the project**:
+   ```bash
+   cd /tmp/test-sse-project
+   cd server && cargo build
+   cd ../client && cargo build
+   ```
+
+2. **Run the server**:
+   ```bash
+   cd /tmp/test-sse-project/server
+   RUST_LOG=trace cargo run -- --port 8084 --debug
+   ```
+
+3. **In another terminal, run the client**:
+   ```bash
+   cd /tmp/test-sse-project/client
+   RUST_LOG=trace cargo run -- --uri "http://localhost:8084" --name "Test User"
+   ```
+
+   You should see output similar to:
+   ```
+   [INFO] Using SSE transport with URI: http://localhost:8084
+   [INFO] Initializing client...
+   [INFO] Server info: {"protocol_version":"2024-11-05","server_info":{"name":"test-sse-project-server","version":"1.0.0"},"tools":[{"description":"A simple hello world tool","input_schema":{"properties":{"name":{"description":"Name to greet","type":"string"}},"required":["name"],"type":"object"},"name":"hello"}]}
+   [INFO] Running in one-shot mode with name: Test User
+   [INFO] Calling tool 'hello' with parameters: {"name":"Test User"}
+   [INFO] Received message: Hello, Test User!
+   Hello, Test User!
+   [INFO] Shutting down client
+   [INFO] Client shutdown complete
+   ```
+
+### Troubleshooting
+
+#### Common Issues with Stdio Transport
+
+1. **Pipe Connection Issues**:
+   - Ensure that the server output is properly piped to the client input
+   - Check for any terminal configuration that might interfere with piping
+
+2. **Process Termination**:
+   - The server process will terminate after the client disconnects
+   - For long-running sessions, consider using the interactive mode
+
+#### Common Issues with SSE Transport
+
+1. **Dependency Issues**:
+   
+   If you encounter dependency errors when building generated projects, you may need to update the `Cargo.toml` files to point to your local MCPR crate:
+
+   ```toml
+   # For local development, use path dependency:
+   mcpr = { path = "/path/to/your/mcpr" }
+   ```
+
+2. **Port Already in Use**:
+   
+   If the SSE server fails to start with a "port already in use" error, try a different port:
+
+   ```bash
+   ./server/target/debug/test-sse-project-server --port 8085
+   ```
+
+3. **Connection Refused**:
+   
+   If the client cannot connect to the server, ensure the server is running and the port is correct:
+
+   ```bash
+   # Check if the server is listening on the port
+   netstat -an | grep 8084
+   ```
+
+4. **HTTP Method Not Allowed (405)**:
+   
+   If you see HTTP 405 errors, ensure that the server is correctly handling all required HTTP methods (GET and POST) for the SSE transport.
+
+5. **Client Registration Issues**:
+   
+   The SSE transport requires client registration before message exchange. Ensure that:
+   - The client successfully registers with the server
+   - The client ID is properly passed in polling requests
+   - The server maintains the client connection state
+
+### Interactive Testing
+
+Both transport types support interactive mode for manual testing:
+
+```bash
+# For stdio transport
+./client/target/debug/test-stdio-project-client --interactive
+
+# For SSE transport
+./client/target/debug/test-sse-project-client --uri "http://localhost:8084" --interactive
+```
+
+In interactive mode, you can:
+- Enter tool names and parameters manually
+- Test different parameter combinations
+- Observe the server's responses in real-time
+
+### Advanced Testing
+
+For more advanced testing scenarios:
+
+1. **Testing with Multiple Clients**:
+   
+   The SSE transport supports multiple concurrent clients:
+   ```bash
+   # Start multiple client instances in different terminals
+   ./client/target/debug/test-sse-project-client --uri "http://localhost:8084" --name "User 1"
+   ./client/target/debug/test-sse-project-client --uri "http://localhost:8084" --name "User 2"
+   ```
+
+2. **Testing Error Handling**:
+   
+   Test how the system handles errors by sending invalid requests:
+   ```bash
+   # In interactive mode, try calling a non-existent tool
+   > call nonexistent_tool {"param": "value"}
+   ```
+
+3. **Performance Testing**:
+   
+   For performance testing, you can use tools like Apache Bench or wrk to simulate multiple concurrent clients.
 
 ## Debugging
 
 Enable debug logging for detailed information:
 
 ```bash
-# Set log level to debug
-RUST_LOG=debug ./server/target/debug/my-project-server
-
-# Capture logs to a file
-RUST_LOG=debug ./server/target/debug/my-project-server > server.log 2>&1
+# Set environment variable for debug logging
+RUST_LOG=debug cargo run
 ```
 
 ## Contributing
 
-Contributions are welcome! Here are some ways you can contribute:
-
-- Implement additional transport options
-- Add more examples
-- Improve documentation
-- Fix bugs and add features
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details. 

@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-03-15
+
+### Added
+- Server-Sent Events (SSE) transport implementation
+  - Client registration and unique client ID assignment
+  - Client-specific message queues
+  - Polling mechanism for clients to receive messages
+  - Proper error handling and logging
+  - Support for all MCP message types
+- Comprehensive documentation for generating and testing projects
+  - Detailed instructions for both stdio and SSE transports
+  - Troubleshooting guides for common issues
+  - Advanced testing scenarios
+
+### Fixed
+- SSE transport message handling
+  - Fixed client message queue management
+  - Improved HTTP request routing for SSE endpoints
+  - Enhanced error handling for network issues
+  - Added proper timeout handling for message reception
+- Template generation for SSE projects
+  - Updated templates to use the correct transport configuration
+  - Fixed dependency management in generated projects
+
+### Improved
+- Enhanced logging throughout the codebase
+  - Added detailed debug and trace logging
+  - Improved error messages for better troubleshooting
+- Updated README with comprehensive testing guide
+  - Step-by-step instructions for generating and testing projects
+  - Examples of expected output for both transport types
+  - Common issues and their solutions
+
 ## [0.1.0] - 2024-03-12
 
 ### Added

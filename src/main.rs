@@ -45,7 +45,7 @@ enum Commands {
         #[arg(short, long, default_value = ".")]
         output: String,
 
-        /// Transport type to use (stdio, sse, websocket)
+        /// Transport type to use (stdio, sse)
         #[arg(short, long, default_value = "stdio")]
         transport: String,
     },
@@ -113,10 +113,25 @@ fn main() {
                 "Generating complete 'hello mcp' project '{}' in '{}'",
                 name, output
             );
+
+            // Validate transport type
+            if transport != "stdio" && transport != "sse" {
+                eprintln!(
+                    "Error: Unsupported transport type: {}. Supported types are 'stdio' and 'sse'.",
+                    transport
+                );
+                eprintln!("Note: WebSocket transport is planned but not yet implemented.");
+                std::process::exit(1);
+            }
+
             println!("Using transport type: {}", transport);
 
             let output_path = PathBuf::from(output);
-            match mcpr::generator::generate_project(name, &output_path, transport) {
+            match mcpr::generator::generate_project(
+                name,
+                output_path.to_str().unwrap_or(output),
+                transport,
+            ) {
                 Ok(_) => {
                     println!("Complete 'hello mcp' project generated successfully!");
                 }

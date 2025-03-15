@@ -82,59 +82,55 @@ pub fn generate_client(name: &str, output_dir: &Path) -> Result<(), GeneratorErr
 /// Generate a complete "hello mcp" project with both client and server
 pub fn generate_project(
     name: &str,
-    output_dir: &Path,
+    output_dir: &str,
     transport_type: &str,
 ) -> Result<(), GeneratorError> {
-    // Validate name
-    if !is_valid_name(name) {
-        return Err(GeneratorError::InvalidName(format!(
-            "Invalid project name: {}",
-            name
-        )));
-    }
+    println!(
+        "Generating complete 'hello mcp' project '{}' in '{}'",
+        name, output_dir
+    );
+    println!("Using transport type: {}", transport_type);
 
-    // Validate transport type
-    if !["stdio", "sse", "websocket"].contains(&transport_type) {
-        return Err(GeneratorError::InvalidName(format!(
-            "Invalid transport type: {}. Must be one of: stdio, sse, websocket",
-            transport_type
-        )));
-    }
-
-    // Create output directory if it doesn't exist
-    let project_dir = output_dir.join(name);
+    // Create project directory
+    let project_dir = Path::new(output_dir).join(name);
     fs::create_dir_all(&project_dir)?;
 
-    // Generate project structure
+    // Create server directory
     let server_dir = project_dir.join("server");
-    let client_dir = project_dir.join("client");
-
     fs::create_dir_all(&server_dir)?;
+
+    // Create client directory
+    let client_dir = project_dir.join("client");
     fs::create_dir_all(&client_dir)?;
 
-    // Generate server files
+    // Generate server
     generate_project_server(&server_dir, name, transport_type)?;
 
-    // Generate client files
+    // Generate client
     generate_project_client(&client_dir, name, transport_type)?;
 
-    // Generate project README
+    // Generate README
     generate_project_readme(&project_dir, name, transport_type)?;
 
-    // Generate test scripts
+    // Generate test script
     generate_project_test_script(&project_dir, name, transport_type)?;
 
     println!(
-        "Project '{}' generated successfully in '{}'",
+        "Project '{}' with {} transport generated successfully in '{}'",
         name,
+        transport_type,
         project_dir.display()
     );
+    println!("To run the server:");
+    println!("  cd {}/{}/server", output_dir, name);
+    println!("  cargo run");
+    println!("To run the client:");
+    println!("  cd {}/{}/client", output_dir, name);
+    println!("  cargo run -- --interactive");
     println!("To run the tests:");
-    println!("  cd {}", project_dir.display());
-    println!("  ./run_tests.sh    # Run all tests");
-    println!("  ./test_server.sh  # Run server tests only");
-    println!("  ./test_client.sh  # Run client tests only");
-    println!("  ./test.sh         # Run legacy test");
+    println!("  cd {}/{}", output_dir, name);
+    println!("  ./test.sh");
+    println!("Complete 'hello mcp' project generated successfully!");
 
     Ok(())
 }
@@ -225,56 +221,38 @@ fn generate_project_server(
     // Generate main.rs
     let main_rs = src_dir.join("main.rs");
 
-    // Read the template
-    let template = templates::PROJECT_SERVER_TEMPLATE;
-
-    // Process the template based on transport type
-    let mut lines: Vec<String> = Vec::new();
-    let mut skip_section = false;
-
-    for line in template.lines() {
-        if line.trim().starts_with("{{#if transport_type ==") {
-            let condition = line.trim();
-            if condition.contains(&format!("\"{}\"", transport_type)) {
-                skip_section = false;
-            } else {
-                skip_section = true;
-            }
-            continue;
-        } else if line.trim().starts_with("{{#if transport_type !=") {
-            let condition = line.trim();
-            if condition.contains(&format!("\"{}\"", transport_type)) {
-                skip_section = true;
-            } else {
-                skip_section = false;
-            }
-            continue;
-        } else if line.trim() == "{{/if}}" {
-            skip_section = false;
-            continue;
+    // Select the appropriate template based on transport type
+    let template = match transport_type {
+        "stdio" => templates::STDIO_SERVER_TEMPLATE,
+        "sse" => templates::SSE_SERVER_TEMPLATE,
+        _ => {
+            return Err(GeneratorError::Template(format!(
+                "Unsupported transport type: {}. Supported types are 'stdio' and 'sse'. WebSocket transport is planned but not yet implemented.",
+                transport_type
+            )))
         }
+    };
 
-        if !skip_section {
-            lines.push(line.replace("{{name}}", name));
-        }
-    }
-
-    // Write the processed template to the file
-    let content = lines.join("\n");
+    // Replace template variables
+    let content = template.replace("{{name}}", name);
     fs::write(main_rs, content)?;
 
     // Generate Cargo.toml
     let cargo_toml = server_dir.join("Cargo.toml");
-    let content = templates::PROJECT_SERVER_CARGO_TEMPLATE
-        .replace("{{name}}", &format!("{}-server", name))
-        .replace(
-            "{{transport_deps}}",
-            match transport_type {
-                "sse" => "reqwest = { version = \"0.11\", features = [\"blocking\"] }",
-                "websocket" => "tungstenite = \"0.20\"",
-                _ => "",
-            },
-        );
+
+    // Select the appropriate Cargo template based on transport type
+    let cargo_template = match transport_type {
+        "stdio" => templates::STDIO_SERVER_CARGO_TEMPLATE,
+        "sse" => templates::SSE_SERVER_CARGO_TEMPLATE,
+        _ => {
+            return Err(GeneratorError::Template(format!(
+                "Unsupported transport type: {}. Supported types are 'stdio' and 'sse'. WebSocket transport is planned but not yet implemented.",
+                transport_type
+            )))
+        }
+    };
+
+    let content = cargo_template.replace("{{name}}", name);
     fs::write(cargo_toml, content)?;
 
     Ok(())
@@ -292,56 +270,38 @@ fn generate_project_client(
     // Generate main.rs
     let main_rs = src_dir.join("main.rs");
 
-    // Read the template
-    let template = templates::PROJECT_CLIENT_TEMPLATE;
-
-    // Process the template based on transport type
-    let mut lines: Vec<String> = Vec::new();
-    let mut skip_section = false;
-
-    for line in template.lines() {
-        if line.trim().starts_with("{{#if transport_type ==") {
-            let condition = line.trim();
-            if condition.contains(&format!("\"{}\"", transport_type)) {
-                skip_section = false;
-            } else {
-                skip_section = true;
-            }
-            continue;
-        } else if line.trim().starts_with("{{#if transport_type !=") {
-            let condition = line.trim();
-            if condition.contains(&format!("\"{}\"", transport_type)) {
-                skip_section = true;
-            } else {
-                skip_section = false;
-            }
-            continue;
-        } else if line.trim() == "{{/if}}" {
-            skip_section = false;
-            continue;
+    // Select the appropriate template based on transport type
+    let template = match transport_type {
+        "stdio" => templates::STDIO_CLIENT_TEMPLATE,
+        "sse" => templates::SSE_CLIENT_TEMPLATE,
+        _ => {
+            return Err(GeneratorError::Template(format!(
+                "Unsupported transport type: {}. Supported types are 'stdio' and 'sse'. WebSocket transport is planned but not yet implemented.",
+                transport_type
+            )))
         }
+    };
 
-        if !skip_section {
-            lines.push(line.replace("{{name}}", name));
-        }
-    }
-
-    // Write the processed template to the file
-    let content = lines.join("\n");
+    // Replace template variables
+    let content = template.replace("{{name}}", name);
     fs::write(main_rs, content)?;
 
     // Generate Cargo.toml
     let cargo_toml = client_dir.join("Cargo.toml");
-    let content = templates::PROJECT_CLIENT_CARGO_TEMPLATE
-        .replace("{{name}}", &format!("{}-client", name))
-        .replace(
-            "{{transport_deps}}",
-            match transport_type {
-                "sse" => "reqwest = { version = \"0.11\", features = [\"blocking\"] }",
-                "websocket" => "tungstenite = \"0.20\"",
-                _ => "",
-            },
-        );
+
+    // Select the appropriate Cargo template based on transport type
+    let cargo_template = match transport_type {
+        "stdio" => templates::STDIO_CLIENT_CARGO_TEMPLATE,
+        "sse" => templates::SSE_CLIENT_CARGO_TEMPLATE,
+        _ => {
+            return Err(GeneratorError::Template(format!(
+                "Unsupported transport type: {}. Supported types are 'stdio' and 'sse'. WebSocket transport is planned but not yet implemented.",
+                transport_type
+            )))
+        }
+    };
+
+    let content = cargo_template.replace("{{name}}", name);
     fs::write(cargo_toml, content)?;
 
     Ok(())
@@ -353,11 +313,23 @@ fn generate_project_readme(
     transport_type: &str,
 ) -> Result<(), GeneratorError> {
     let readme = project_dir.join("README.md");
-    let content = templates::PROJECT_README_TEMPLATE
-        .replace("{{name}}", name)
-        .replace("{{transport_type}}", transport_type);
-    fs::write(readme, content)?;
 
+    // Select the appropriate README template based on transport type
+    let readme_template = match transport_type {
+        "stdio" => templates::PROJECT_README_STDIO_TEMPLATE,
+        "sse" => templates::PROJECT_README_SSE_TEMPLATE,
+        _ => {
+            return Err(GeneratorError::Template(format!(
+                "Unsupported transport type: {}. Supported types are 'stdio' and 'sse'. WebSocket transport is planned but not yet implemented.",
+                transport_type
+            )))
+        }
+    };
+
+    // Replace template variables
+    let content = readme_template.replace("{{name}}", name);
+
+    fs::write(readme, content)?;
     Ok(())
 }
 
@@ -366,83 +338,27 @@ fn generate_project_test_script(
     name: &str,
     transport_type: &str,
 ) -> Result<(), GeneratorError> {
-    // Generate server test script
-    let server_test_script = project_dir.join("test_server.sh");
-    let server_test_content = process_template(
-        templates::PROJECT_SERVER_TEST_TEMPLATE,
-        name,
-        transport_type,
-    )?;
-    fs::write(&server_test_script, server_test_content)?;
-    make_executable(&server_test_script)?;
-
-    // Generate client test script
-    let client_test_script = project_dir.join("test_client.sh");
-    let client_test_content = process_template(
-        templates::PROJECT_CLIENT_TEST_TEMPLATE,
-        name,
-        transport_type,
-    )?;
-    fs::write(&client_test_script, client_test_content)?;
-    make_executable(&client_test_script)?;
-
-    // Generate combined run_tests.sh script
-    let run_tests_script = project_dir.join("run_tests.sh");
-    let run_tests_content =
-        process_template(templates::PROJECT_RUN_TESTS_TEMPLATE, name, transport_type)?;
-    fs::write(&run_tests_script, run_tests_content)?;
-    make_executable(&run_tests_script)?;
-
-    // For backward compatibility, also generate the original test.sh
+    // Generate test script
     let test_script = project_dir.join("test.sh");
-    let test_content = process_template(
-        templates::PROJECT_TEST_SCRIPT_TEMPLATE,
-        name,
-        transport_type,
-    )?;
-    fs::write(&test_script, test_content)?;
+
+    // Select the appropriate test script template based on transport type
+    let test_script_template = match transport_type {
+        "stdio" => templates::STDIO_TEST_SCRIPT_TEMPLATE,
+        "sse" => templates::SSE_TEST_SCRIPT_TEMPLATE,
+        _ => {
+            return Err(GeneratorError::Template(format!(
+                "Unsupported transport type: {}. Supported types are 'stdio' and 'sse'. WebSocket transport is planned but not yet implemented.",
+                transport_type
+            )))
+        }
+    };
+
+    // Replace template variables
+    let content = test_script_template.replace("{{name}}", name);
+    fs::write(&test_script, content)?;
     make_executable(&test_script)?;
 
     Ok(())
-}
-
-/// Process a template by replacing variables and handling conditional sections
-fn process_template(
-    template: &str,
-    name: &str,
-    transport_type: &str,
-) -> Result<String, GeneratorError> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut skip_section = false;
-
-    for line in template.lines() {
-        if line.trim().starts_with("{{#if transport_type ==") {
-            let condition = line.trim();
-            if condition.contains(&format!("\"{}\"", transport_type)) {
-                skip_section = false;
-            } else {
-                skip_section = true;
-            }
-            continue;
-        } else if line.trim().starts_with("{{#if transport_type !=") {
-            let condition = line.trim();
-            if condition.contains(&format!("\"{}\"", transport_type)) {
-                skip_section = true;
-            } else {
-                skip_section = false;
-            }
-            continue;
-        } else if line.trim() == "{{/if}}" {
-            skip_section = false;
-            continue;
-        }
-
-        if !skip_section {
-            lines.push(line.replace("{{name}}", name));
-        }
-    }
-
-    Ok(lines.join("\n"))
 }
 
 /// Make a file executable on Unix systems
