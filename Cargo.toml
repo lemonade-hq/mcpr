@@ -29,7 +29,9 @@ clap = { version = "4.4", features = ["derive"] }
 tokio = { version = "1.35", features = ["full"], optional = true }
 url = "2.2.2"                                                      # Using 2.2.2 for compatibility with examples
 tiny_http = "0.12"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+rand = "0.8"
+tungstenite = { version = "0.20", features = ["native-tls"] }
 
 # Optional dependencies that are only used by specific features
 [dev-dependencies]

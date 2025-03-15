@@ -1,194 +1,25 @@
-//! Templates for generating MCP server and client stubs
+//! Templates for generating MCP server and client stubs with SSE transport
 
-/// Template for server main.rs
-pub const SERVER_MAIN_TEMPLATE: &str = r#"//! MCP Server: {{name}}
-
-use clap::Parser;
-use mcpr::schema::{
-    CallToolParams, CallToolResult, Implementation, InitializeResult, JSONRPCError, JSONRPCMessage,
-    JSONRPCResponse, ServerCapabilities, TextContent, Tool, ToolInputSchema, ToolResultContent,
-    ToolsCapability,
-};
-use mcpr::transport::stdio::StdioTransport;
-use serde_json::{json, Value};
-use std::error::Error;
-use std::collections::HashMap;
-use log::{info, error, debug, warn};
-
-/// CLI arguments
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Enable debug output
-    #[arg(short, long)]
-    debug: bool,
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
-    
-    if args.debug {
-        println!("Debug mode enabled");
-    }
-    
-    println!("Starting MCP server: {{name}}");
-    
-    // Create a transport for communication
-    let mut transport = StdioTransport::new();
-    
-    // Wait for initialize request
-    let message: JSONRPCMessage = transport.receive()?;
-    
-    // Server implementation here...
-    
-    Ok(())
-}
-"#;
-
-/// Template for server Cargo.toml
-pub const SERVER_CARGO_TEMPLATE: &str = r#"[package]
-name = "{{name}}"
-version = "0.1.0"
-edition = "2021"
-description = "MCP server generated from mcpr template"
-
-[dependencies]
-mcpr = "0.2.0"
-clap = { version = "4.4", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-"#;
-
-/// Template for server README.md
-pub const SERVER_README_TEMPLATE: &str = r#"# {{name}}
-
-An MCP server generated using the mcpr CLI.
-
-## Running the Server
-
-```bash
-cargo run
-```
-
-## Connecting to the Server
-
-You can connect to this server using any MCP client. For example:
-
-```bash
-mcpr connect --uri stdio://./target/debug/{{name}}
-```
-
-## Available Tools
-
-This server provides the following tools:
-
-- `example`: A simple example tool that processes a query string
-"#;
-
-/// Template for client main.rs
-pub const CLIENT_MAIN_TEMPLATE: &str = r#"//! MCP Client: {{name}}
-
-use clap::Parser;
-use mcpr::schema::{
-    CallToolParams, CallToolResult, ClientCapabilities, Implementation, InitializeParams,
-    JSONRPCMessage, JSONRPCRequest, RequestId, TextContent, ToolResultContent,
-};
-use mcpr::transport::stdio::StdioTransport;
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::error::Error;
-use std::io::{self, Write};
-use log::{info, error, debug};
-
-/// CLI arguments
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// URI of the server to connect to
-    #[arg(short, long)]
-    uri: String,
-
-    /// Enable debug output
-    #[arg(short, long)]
-    debug: bool,
-}
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
-    
-    if args.debug {
-        println!("Debug mode enabled");
-    }
-    
-    println!("Starting MCP client: {{name}}");
-    println!("Connecting to server: {}", args.uri);
-    
-    // Client implementation here...
-    
-    Ok(())
-}
-"#;
-
-/// Template for client Cargo.toml
-pub const CLIENT_CARGO_TEMPLATE: &str = r#"[package]
-name = "{{name}}"
-version = "0.1.0"
-edition = "2021"
-description = "MCP client generated from mcpr template"
-
-[dependencies]
-mcpr = "0.2.0"
-clap = { version = "4.4", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-"#;
-
-/// Template for client README.md
-pub const CLIENT_README_TEMPLATE: &str = r#"# {{name}}
-
-An MCP client generated using the mcpr CLI.
-
-## Running the Client
-
-```bash
-cargo run -- --uri <server_uri>
-```
-
-For example, to connect to a local server:
-
-```bash
-cargo run -- --uri stdio://./path/to/server
-```
-
-## Usage
-
-Once connected, you can enter queries that will be processed by the server's tools.
-Type 'exit' to quit the client.
-"#;
-
-/// Template for project server main.rs
-pub const PROJECT_SERVER_TEMPLATE: &str = r#"//! MCP Server for {{name}} project
+/// Template for project server main.rs with SSE transport
+pub const PROJECT_SERVER_TEMPLATE: &str = r#"//! MCP Server for {{name}} project with SSE transport
 
 use clap::Parser;
 use mcpr::{
     error::MCPError,
-    schema::common::{Tool, ToolInputSchema},
+    schema::{
+        common::{Tool, ToolInputSchema},
+        json_rpc::{JSONRPCMessage, JSONRPCRequest, RequestId},
+    },
     transport::{
-        {{#if transport_type == "stdio"}}
-        stdio::StdioTransport,
-        {{/if}}
-        {{#if transport_type == "sse"}}
         sse::SSETransport,
-        {{/if}}
-        {{#if transport_type == "websocket"}}
-        websocket::WebSocketTransport,
-        {{/if}}
         Transport,
     },
 };
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use log::{info, error, debug, warn};
 
 /// CLI arguments
@@ -199,11 +30,9 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
     
-    {{#if transport_type != "stdio"}}
     /// Port to listen on
     #[arg(short, long, default_value = "8080")]
     port: u16,
-    {{/if}}
 }
 
 /// Server configuration
@@ -305,6 +134,8 @@ where
 
     /// Process incoming messages
     fn process_messages(&mut self) -> Result<(), MCPError> {
+        info!("Server is running and waiting for client connections...");
+        
         loop {
             let message = {
                 let transport = self
@@ -316,7 +147,10 @@ where
                 match transport.receive() {
                     Ok(msg) => msg,
                     Err(e) => {
-                        error!("Error receiving message: {}", e);
+                        // For transport errors, log them but continue waiting
+                        // This allows the server to keep running even if there are temporary connection issues
+                        error!("Transport error: {}", e);
+                        std::thread::sleep(std::time::Duration::from_millis(1000));
                         continue;
                     }
                 }
@@ -419,22 +253,25 @@ where
         // Call the handler
         match handler(tool_params) {
             Ok(result) => {
-                // Create tool result response
-                let response = mcpr::schema::json_rpc::JSONRPCResponse::new(
-                    id,
-                    serde_json::json!({
-                        "result": result
-                    }),
-                );
+                // Create tool call response
+                let response = mcpr::schema::json_rpc::JSONRPCResponse::new(id, result);
 
                 // Send the response
-                debug!("Sending tool call response: {:?}", result);
+                debug!("Sending tool call response: {:?}", response);
                 transport.send(&mcpr::schema::json_rpc::JSONRPCMessage::Response(response))?;
             }
             Err(e) => {
-                // Send error response
-                error!("Tool execution failed: {}", e);
-                self.send_error(id, -32000, format!("Tool execution failed: {}", e), None)?;
+                // Create error response
+                let error = mcpr::schema::json_rpc::JSONRPCError::new(
+                    id,
+                    -32000,
+                    format!("Tool call failed: {}", e),
+                    None,
+                );
+
+                // Send the error response
+                debug!("Sending tool call error response: {:?}", error);
+                transport.send(&mcpr::schema::json_rpc::JSONRPCMessage::Error(error))?;
             }
         }
 
@@ -541,15 +378,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
     
     // Create transport and start the server
-    {{#if transport_type == "stdio"}}
-    let transport = StdioTransport::new();
-    {{/if}}
-    {{#if transport_type == "sse"}}
-    let transport = SSETransport::new(format!("http://localhost:{}", args.port));
-    {{/if}}
-    {{#if transport_type == "websocket"}}
-    let transport = WebSocketTransport::new(&format!("ws://localhost:{}", args.port));
-    {{/if}}
+    let uri = format!("http://localhost:{}", args.port);
+    info!("Starting SSE server on {}", uri);
+    let transport = SSETransport::new_server(&uri);
     
     info!("Starting {{name}}-server...");
     server.start(transport)?;
@@ -557,43 +388,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }"#;
 
-/// Template for project server Cargo.toml
-pub const PROJECT_SERVER_CARGO_TEMPLATE: &str = r#"[package]
-name = "{{name}}-server"
-version = "0.1.0"
-edition = "2021"
-description = "MCP server for {{name}} project"
-
-[dependencies]
-# For local development, use path dependency:
-mcpr = { path = "../../../mcpr" }
-# For production, use version from crates.io:
-# mcpr = "0.2.0"
-clap = { version = "4.4", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-env_logger = "0.10"
-log = "0.4"
-{{transport_deps}}
-"#;
-
-/// Template for project client main.rs
-pub const PROJECT_CLIENT_TEMPLATE: &str = r#"//! MCP Client for {{name}} project
+/// Template for project client main.rs with SSE transport
+pub const PROJECT_CLIENT_TEMPLATE: &str = r#"//! MCP Client for {{name}} project with SSE transport
 
 use clap::Parser;
 use mcpr::{
     error::MCPError,
     schema::json_rpc::{JSONRPCMessage, JSONRPCRequest, RequestId},
     transport::{
-        {{#if transport_type == "stdio"}}
-        stdio::StdioTransport,
-        {{/if}}
-        {{#if transport_type == "sse"}}
         sse::SSETransport,
-        {{/if}}
-        {{#if transport_type == "websocket"}}
-        websocket::WebSocketTransport,
-        {{/if}}
         Transport,
     },
 };
@@ -601,7 +404,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::io::{self, Write};
-use log::{info, error, debug};
+use std::sync::{Arc, Mutex};
+use log::{info, error, debug, warn};
 
 /// CLI arguments
 #[derive(Parser)]
@@ -611,11 +415,9 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
     
-    {{#if transport_type != "stdio"}}
     /// Server URI
     #[arg(short, long, default_value = "http://localhost:8080")]
     uri: String,
-    {{/if}}
     
     /// Run in interactive mode
     #[arg(short, long)]
@@ -673,11 +475,11 @@ impl<T: Transport> Client<T> {
                     "Initialization failed: {:?}",
                     err
                 )))
-            },
+            }
             _ => {
                 error!("Unexpected response type");
                 Err(MCPError::Protocol("Unexpected response type".to_string()))
-            },
+            }
         }
     }
 
@@ -711,14 +513,10 @@ impl<T: Transport> Client<T> {
             JSONRPCMessage::Response(resp) => {
                 // Extract the tool result from the response
                 let result_value = resp.result;
-                let result = result_value.get("result").ok_or_else(|| {
-                    error!("Missing 'result' field in response");
-                    MCPError::Protocol("Missing 'result' field in response".to_string())
-                })?;
-
+                
                 // Parse the result
-                debug!("Parsing result: {:?}", result);
-                serde_json::from_value(result.clone()).map_err(|e| {
+                debug!("Parsing result: {:?}", result_value);
+                serde_json::from_value(result_value).map_err(|e| {
                     error!("Failed to parse result: {}", e);
                     MCPError::Serialization(e)
                 })
@@ -800,25 +598,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     
     // Create transport and client
-    {{#if transport_type == "stdio"}}
-    info!("Using stdio transport");
-    let transport = StdioTransport::new();
-    {{/if}}
-    {{#if transport_type == "sse"}}
     info!("Using SSE transport with URI: {}", args.uri);
-    let transport = SSETransport::new(args.uri.clone());
-    {{/if}}
-    {{#if transport_type == "websocket"}}
-    info!("Using WebSocket transport with URI: {}", args.uri);
-    let transport = WebSocketTransport::new(&args.uri);
-    {{/if}}
+    let transport = SSETransport::new(&args.uri);
     
     let mut client = Client::new(transport);
     
     // Initialize the client
     info!("Initializing client...");
-    let init_result = client.initialize()?;
-    info!("Server info: {:?}", init_result);
+    let init_result = match client.initialize() {
+        Ok(result) => {
+            info!("Server info: {:?}", result);
+            result
+        },
+        Err(e) => {
+            error!("Failed to initialize client: {}", e);
+            return Err(Box::new(e));
+        }
+    };
     
     if args.interactive {
         // Interactive mode
@@ -874,7 +670,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             "name": name
         });
         
-        let response: Value = client.call_tool("hello", &request)?;
+        let response: Value = match client.call_tool("hello", &request) {
+            Ok(response) => response,
+            Err(e) => {
+                error!("Error calling tool: {}", e);
+                return Err(Box::new(e));
+            }
+        };
         
         if let Some(message) = response.get("message") {
             let msg = message.as_str().unwrap_or("");
@@ -888,22 +690,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     // Shutdown the client
     info!("Shutting down client");
-    client.shutdown()?;
+    if let Err(e) = client.shutdown() {
+        error!("Error during shutdown: {}", e);
+    }
     info!("Client shutdown complete");
     
     Ok(())
 }"#;
 
-/// Template for project client Cargo.toml
-pub const PROJECT_CLIENT_CARGO_TEMPLATE: &str = r#"[package]
-name = "{{name}}-client"
+/// Template for project server Cargo.toml with SSE transport
+pub const PROJECT_SERVER_CARGO_TEMPLATE: &str = r#"[package]
+name = "{{name}}-server"
 version = "0.1.0"
 edition = "2021"
-description = "MCP client for {{name}} project"
+description = "MCP server for {{name}} project with SSE transport"
 
 [dependencies]
 # For local development, use path dependency:
-mcpr = { path = "../../../mcpr" }
+mcpr = { path = "../.." }
 # For production, use version from crates.io:
 # mcpr = "0.2.0"
 clap = { version = "4.4", features = ["derive"] }
@@ -911,160 +715,58 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 env_logger = "0.10"
 log = "0.4"
-{{transport_deps}}
+reqwest = { version = "0.11", features = ["blocking", "json"] }
 "#;
 
-/// Template for project README.md
-pub const PROJECT_README_TEMPLATE: &str = r#"# {{name}} - MCP Project
+/// Template for project client Cargo.toml with SSE transport
+pub const PROJECT_CLIENT_CARGO_TEMPLATE: &str = r#"[package]
+name = "{{name}}-client"
+version = "0.1.0"
+edition = "2021"
+description = "MCP client for {{name}} project with SSE transport"
 
-A complete MCP project with both client and server components, using {{transport_type}} transport.
-
-## Project Structure
-
-- `server/`: The MCP server implementation
-- `client/`: The MCP client implementation
-- `test.sh`: A test script to run both client and server
-
-## Building the Project
-
-```bash
-# Build the server
-cd server
-cargo build
-
-# Build the client
-cd ../client
-cargo build
-```
-
-## Running the Server
-
-```bash
-cd server
-cargo run
-```
-
-## Running the Client
-
-```bash
-cd client
-cargo run -- --interactive
-```
-
-## Running the Test Script
-
-```bash
-./test.sh
-```
-
-## Available Tools
-
-This server provides the following tools:
-
-- `hello`: A simple tool that greets a person by name
+[dependencies]
+# For local development, use path dependency:
+mcpr = { path = "../.." }
+# For production, use version from crates.io:
+# mcpr = "0.2.0"
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+env_logger = "0.10"
+log = "0.4"
+reqwest = { version = "0.11", features = ["blocking", "json"] }
 "#;
 
-/// Template for project server test script
-pub const PROJECT_SERVER_TEST_TEMPLATE: &str = r#"#!/bin/bash
-
-# Test script for {{name}}-server
-
-# Exit on error
-set -e
-
-echo "Building server..."
-cd server
-cargo build
-cd ..
-
-# Create a simple test that runs the server directly
-echo "Creating a simple test file..."
-cat > test_input.json << EOF
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol_version":"2024-11-05"}}
-{"jsonrpc":"2.0","id":2,"method":"tool_call","params":{"name":"hello","parameters":{"name":"MCP User"}}}
-{"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}
-EOF
-
-echo "Running server with test input..."
-./server/target/debug/{{name}}-server-server < test_input.json > test_output.json
-
-echo "Checking server output..."
-if grep -q "Hello, MCP User" test_output.json; then
-    echo "Server test completed successfully!"
-else
-    echo "Server test failed. Server output does not contain expected response."
-    cat test_output.json
-    exit 1
-fi
-
-# Clean up
-rm test_input.json test_output.json
-"#;
-
-/// Template for project client test script
-pub const PROJECT_CLIENT_TEST_TEMPLATE: &str = r#"#!/bin/bash
-
-# Test script for {{name}}-client
-
-# Exit on error
-set -e
-
-echo "Building client..."
-cd client
-cargo build
-cd ..
-
-# Create a mock server response
-echo "Creating mock server responses..."
-cat > server_responses.json << EOF
-{"jsonrpc":"2.0","id":1,"result":{"protocol_version":"2024-11-05","server_info":{"name":"{{name}}-server","version":"1.0.0"},"tools":[{"name":"hello","description":"A simple hello world tool","input_schema":{"type":"object","properties":{"name":{"type":"string","description":"Name to greet"}},"required":["name"]}}]}}
-{"jsonrpc":"2.0","id":2,"result":{"result":{"message":"Hello, MCP User!"}}}
-{"jsonrpc":"2.0","id":3,"result":{}}
-EOF
-
-# Run the client and capture its output
-echo "Running client with mock server responses..."
-./client/target/debug/{{name}}-client-client --name "MCP User" < server_responses.json > client_output.json
-
-echo "Checking client output..."
-if grep -q "initialize" client_output.json && grep -q "tool_call" client_output.json && grep -q "shutdown" client_output.json; then
-    echo "Client test completed successfully!"
-else
-    echo "Client test failed. Client output does not contain expected requests."
-    cat client_output.json
-    exit 1
-fi
-
-# Clean up
-rm server_responses.json client_output.json
-"#;
-
-/// Template for project combined test script
-pub const PROJECT_RUN_TESTS_TEMPLATE: &str = r#"#!/bin/bash
-
-# Combined test script for {{name}} MCP project
-
-# Exit on error
-set -e
-
-echo "=== Running server test ==="
-./test_server.sh
-
-echo ""
-echo "=== Running client test ==="
-./test_client.sh
-
-echo ""
-echo "All tests completed successfully!"
-"#;
-
-/// Template for project test script (original, kept for backward compatibility)
+/// Template for project test script with SSE transport
 pub const PROJECT_TEST_SCRIPT_TEMPLATE: &str = r#"#!/bin/bash
 
-# Test script for {{name}} MCP project
+# Test script for {{name}} MCP project with SSE transport
 
 # Exit on error
 set -e
+
+# Enable verbose output
+set -x
+
+# Function to clean up on exit
+cleanup() {
+  echo "Cleaning up..."
+  if [ ! -z "$SERVER_PID" ]; then
+    echo "Shutting down server (PID: $SERVER_PID)..."
+    kill $SERVER_PID 2>/dev/null || true
+  fi
+  if [ ! -z "$CAT_PID" ]; then
+    kill $CAT_PID 2>/dev/null || true
+  fi
+  if [ ! -z "$SERVER_PIPE" ] && [ -e "$SERVER_PIPE" ]; then
+    rm $SERVER_PIPE 2>/dev/null || true
+  fi
+  exit $1
+}
+
+# Set up trap for clean exit
+trap 'cleanup 1' INT TERM
 
 echo "Building server..."
 cd server
@@ -1074,46 +776,44 @@ echo "Building client..."
 cd ../client
 cargo build
 
-{{#if transport_type == "stdio"}}
-echo "Creating a simple test file..."
-cd ..
-cat > test_input.json << EOF
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol_version":"2024-11-05"}}
-{"jsonrpc":"2.0","id":2,"method":"tool_call","params":{"name":"hello","parameters":{"name":"MCP User"}}}
-{"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}
-EOF
+# Create a named pipe for server output
+SERVER_PIPE="/tmp/server_pipe_$$"
+mkfifo $SERVER_PIPE
 
-echo "Running server with test input..."
-./server/target/debug/{{name}}-server < test_input.json > test_output.json
+# Start reading from the pipe in the background
+cat $SERVER_PIPE &
+CAT_PID=$!
 
-echo "Checking server output..."
-if grep -q "Hello, MCP User" test_output.json; then
-    echo "Test completed successfully!"
-else
-    echo "Test failed. Server output does not contain expected response."
-    cat test_output.json
-    exit 1
-fi
-
-# Clean up
-rm test_input.json test_output.json
-{{/if}}
-
-{{#if transport_type != "stdio"}}
 echo "Starting server in background..."
 cd ..
-./server/target/debug/{{name}}-server-server --port 8081 &
+RUST_LOG=debug,mcpr=trace ./server/target/debug/{{name}}-server --port 8081 > $SERVER_PIPE 2>&1 &
 SERVER_PID=$!
 
 # Give the server time to start
-sleep 2
+echo "Waiting for server to start..."
+sleep 3
+
+# Check if server is still running
+if ! kill -0 $SERVER_PID 2>/dev/null; then
+  echo "Error: Server failed to start or crashed"
+  cleanup 1
+fi
 
 echo "Running client..."
-./client/target/debug/{{name}}-client-client --uri "http://localhost:8081" --name "MCP User"
+RUST_LOG=debug,mcpr=trace ./client/target/debug/{{name}}-client --uri "http://localhost:8081" --name "MCP User"
+CLIENT_EXIT=$?
+
+if [ $CLIENT_EXIT -ne 0 ]; then
+  echo "Error: Client exited with code $CLIENT_EXIT"
+  cleanup $CLIENT_EXIT
+fi
 
 echo "Shutting down server..."
-kill $SERVER_PID
-{{/if}}
+kill $SERVER_PID 2>/dev/null || true
+kill $CAT_PID 2>/dev/null || true
+rm $SERVER_PIPE 2>/dev/null || true
+wait $SERVER_PID 2>/dev/null || true
 
 echo "Test completed successfully!"
+cleanup 0
 "#;
