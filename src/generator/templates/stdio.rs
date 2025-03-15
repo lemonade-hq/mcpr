@@ -382,6 +382,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 /// Template for project client main.rs with stdio transport
 pub const PROJECT_CLIENT_TEMPLATE: &str = r#"//! MCP Client for {{name}} project with stdio transport
+//!
+//! This client demonstrates how to connect to an MCP server using stdio transport.
+//! 
+//! There are two ways to use this client:
+//! 1. Connect to an already running server (recommended for production)
+//! 2. Start a new server process and connect to it (convenient for development)
+//!
+//! The client supports both interactive and one-shot modes.
 
 use clap::Parser;
 use mcpr::{
@@ -395,10 +403,12 @@ use mcpr::{
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::error::Error;
-use std::io::{self, Write};
-use std::process::{Command, Stdio};
+use std::io::{self, BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
-use log::{info, error, debug};
+use std::thread;
+use std::time::{Duration, Instant};
+use log::{info, error, debug, warn};
 
 /// CLI arguments
 #[derive(Parser)]
@@ -408,9 +418,13 @@ struct Args {
     #[arg(short, long)]
     debug: bool,
     
-    /// Server command to execute
+    /// Server command to execute (if not connecting to an existing server)
     #[arg(short, long, default_value = "./server/target/debug/{{name}}-server")]
     server_cmd: String,
+    
+    /// Connect to an already running server instead of starting a new one
+    #[arg(short, long)]
+    connect: bool,
     
     /// Run in interactive mode
     #[arg(short, long)]
@@ -419,6 +433,10 @@ struct Args {
     /// Name to greet (for non-interactive mode)
     #[arg(short, long)]
     name: Option<String>,
+    
+    /// Timeout in seconds for operations
+    #[arg(short, long, default_value = "30")]
+    timeout: u64,
 }
 
 /// High-level MCP client
@@ -571,6 +589,80 @@ impl<T: Transport> Client<T> {
     }
 }
 
+/// Connect to an already running server
+fn connect_to_running_server(command: &str, args: &[&str]) -> Result<(StdioTransport, Option<Child>), Box<dyn Error>> {
+    info!("Connecting to running server with command: {} {}", command, args.join(" "));
+    
+    // Start a new process that will connect to the server
+    let mut process = Command::new(command)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    
+    // Create a stderr reader to monitor server output
+    if let Some(stderr) = process.stderr.take() {
+        let stderr_reader = BufReader::new(stderr);
+        thread::spawn(move || {
+            for line in stderr_reader.lines() {
+                if let Ok(line) = line {
+                    debug!("Server stderr: {}", line);
+                }
+            }
+        });
+    }
+    
+    // Give the server a moment to start up
+    thread::sleep(Duration::from_millis(500));
+    
+    // Create a transport that communicates with the server process
+    let transport = StdioTransport::with_reader_writer(
+        Box::new(process.stdout.take().ok_or("Failed to get stdout")?),
+        Box::new(process.stdin.take().ok_or("Failed to get stdin")?),
+    );
+    
+    Ok((transport, Some(process)))
+}
+
+/// Start a new server and connect to it
+fn start_and_connect_to_server(server_cmd: &str) -> Result<(StdioTransport, Option<Child>), Box<dyn Error>> {
+    info!("Starting server process: {}", server_cmd);
+    
+    // Start the server process
+    let mut server_process = Command::new(server_cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    
+    // Create a stderr reader to monitor server output
+    if let Some(stderr) = server_process.stderr.take() {
+        let stderr_reader = BufReader::new(stderr);
+        thread::spawn(move || {
+            for line in stderr_reader.lines() {
+                if let Ok(line) = line {
+                    debug!("Server stderr: {}", line);
+                }
+            }
+        });
+    }
+    
+    // Give the server a moment to start up
+    thread::sleep(Duration::from_millis(500));
+    
+    let server_stdin = server_process.stdin.take().ok_or("Failed to get stdin")?;
+    let server_stdout = server_process.stdout.take().ok_or("Failed to get stdout")?;
+
+    info!("Using stdio transport");
+    let transport = StdioTransport::with_reader_writer(
+        Box::new(server_stdout),
+        Box::new(server_stdin),
+    );
+    
+    Ok((transport, Some(server_process)))
+}
+
 fn prompt_input(prompt: &str) -> Result<String, io::Error> {
     print!("{}: ", prompt);
     io::stdout().flush()?;
@@ -594,34 +686,43 @@ fn main() -> Result<(), Box<dyn Error>> {
         debug!("Debug logging enabled");
     }
     
-    // Start the server process
-    info!("Starting server process: {}", args.server_cmd);
-    let server_process = Command::new(&args.server_cmd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
+    // Set timeout
+    let timeout = Duration::from_secs(args.timeout);
+    info!("Operation timeout set to {} seconds", args.timeout);
     
-    let server_stdin = server_process.stdin.unwrap();
-    let server_stdout = server_process.stdout.unwrap();
-
-    info!("Using stdio transport");
-    let transport = StdioTransport::with_reader_writer(
-        Box::new(server_stdout),
-        Box::new(server_stdin),
-    );
+    // Create transport and server process based on connection mode
+    let (transport, mut server_process) = if args.connect {
+        info!("Connecting to already running server");
+        connect_to_running_server(&args.server_cmd, &[])?
+    } else {
+        info!("Starting new server process");
+        start_and_connect_to_server(&args.server_cmd)?
+    };
     
     let mut client = Client::new(transport);
     
-    // Initialize the client
+    // Initialize the client with timeout
     info!("Initializing client...");
-    let init_result = match client.initialize() {
-        Ok(result) => {
-            info!("Server info: {:?}", result);
-            result
-        },
-        Err(e) => {
-            error!("Failed to initialize client: {}", e);
-            return Err(Box::new(e));
+    let start_time = Instant::now();
+    let init_result = loop {
+        if start_time.elapsed() >= timeout {
+            error!("Initialization timed out after {:?}", timeout);
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("Initialization timed out after {:?}", timeout),
+            )));
+        }
+        
+        match client.initialize() {
+            Ok(result) => {
+                info!("Server info: {:?}", result);
+                break result;
+            },
+            Err(e) => {
+                warn!("Initialization attempt failed: {}", e);
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
         }
     };
     
@@ -704,6 +805,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     info!("Client shutdown complete");
     
+    // If we started the server, terminate it gracefully
+    if let Some(mut process) = server_process {
+        info!("Terminating server process...");
+        let _ = process.kill();
+    }
+    
     Ok(())
 }"#;
 
@@ -743,6 +850,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 env_logger = "0.10"
 log = "0.4"
+# Additional dependencies for improved client
+anyhow = "1.0"
+thiserror = "1.0"
 "#;
 
 /// Template for project test script with stdio transport
@@ -753,30 +863,37 @@ pub const PROJECT_TEST_SCRIPT_TEMPLATE: &str = r#"#!/bin/bash
 # Exit on error
 set -e
 
-echo "Building server..."
+# Colors for output
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+echo -e "${BLUE}Building server...${NC}"
 cd server
 cargo build
 
-echo "Building client..."
+echo -e "${BLUE}Building client...${NC}"
 cd ../client
 cargo build
 
-echo "Creating a simple test file..."
+echo -e "${BLUE}Testing Method 1: Direct JSON-RPC communication${NC}"
 cd ..
+echo -e "${GREEN}Creating a test input file...${NC}"
 cat > test_input.json << EOF
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol_version":"2024-11-05"}}
 {"jsonrpc":"2.0","id":2,"method":"tool_call","params":{"name":"hello","parameters":{"name":"MCP User"}}}
 {"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}
 EOF
 
-echo "Running server with test input..."
+echo -e "${GREEN}Running server with test input...${NC}"
 ./server/target/debug/{{name}}-server < test_input.json > test_output.json
 
-echo "Checking server output..."
+echo -e "${GREEN}Checking server output...${NC}"
 if grep -q "Hello, MCP User" test_output.json; then
-    echo "Test completed successfully!"
+    echo -e "${GREEN}Direct JSON-RPC test completed successfully!${NC}"
 else
-    echo "Test failed. Server output does not contain expected response."
+    echo -e "${RED}Direct JSON-RPC test failed. Server output does not contain expected response.${NC}"
     cat test_output.json
     exit 1
 fi
@@ -784,5 +901,166 @@ fi
 # Clean up
 rm test_input.json test_output.json
 
-echo "Test completed successfully!"
+echo -e "${BLUE}Testing Method 2: Client starting server${NC}"
+echo -e "${GREEN}Running client in one-shot mode...${NC}"
+./client/target/debug/{{name}}-client --name "MCP Tester" > client_output.txt
+
+echo -e "${GREEN}Checking client output...${NC}"
+if grep -q "Hello, MCP Tester" client_output.txt; then
+    echo -e "${GREEN}Client-server test completed successfully!${NC}"
+else
+    echo -e "${RED}Client-server test failed. Client output does not contain expected response.${NC}"
+    cat client_output.txt
+    exit 1
+fi
+
+# Clean up
+rm client_output.txt
+
+echo -e "${BLUE}Testing Method 3: Client connecting to running server${NC}"
+echo -e "${GREEN}Starting server in background...${NC}"
+./server/target/debug/{{name}}-server &
+SERVER_PID=$!
+
+# Give the server a moment to start
+sleep 1
+
+echo -e "${GREEN}Running client in connect mode...${NC}"
+./client/target/debug/{{name}}-client --connect --name "Connected User" > connect_output.txt
+
+echo -e "${GREEN}Checking client output...${NC}"
+if grep -q "Hello, Connected User" connect_output.txt; then
+    echo -e "${GREEN}Connect mode test completed successfully!${NC}"
+else
+    echo -e "${RED}Connect mode test failed. Client output does not contain expected response.${NC}"
+    cat connect_output.txt
+    kill $SERVER_PID
+    exit 1
+fi
+
+# Clean up
+rm connect_output.txt
+kill $SERVER_PID
+
+echo -e "${GREEN}All tests completed successfully!${NC}"
+"#;
+
+/// Template for project README.md with stdio transport
+pub const PROJECT_README_TEMPLATE: &str = r#"# {{name}} MCP Project
+
+This project demonstrates how to build a simple MCP (Machine Comprehension Protocol) client-server application using stdio transport.
+
+## Features
+
+- **Robust Communication**: Reliable stdio transport with proper error handling and timeout management
+- **Multiple Connection Methods**: Connect to an already running server or start a new server process
+- **Interactive Mode**: Choose tools and provide parameters interactively
+- **One-shot Mode**: Run queries directly from the command line
+- **Comprehensive Logging**: Detailed logging for debugging and monitoring
+
+## Project Structure
+
+- `client/`: The MCP client implementation
+- `server/`: The MCP server implementation with tools
+
+## Building the Project
+
+To build both the client and server:
+
+```bash
+# Build the server
+cd server
+cargo build
+
+# Build the client
+cd ../client
+cargo build
+```
+
+## Running the Server
+
+The server can be run in standalone mode:
+
+```bash
+cd server
+cargo run
+```
+
+## Using the Client
+
+The client can connect to the server in two ways:
+
+### Method 1: Start a new server process
+
+```bash
+cd client
+cargo run -- --name "Your Name"
+```
+
+This will start a new server process and connect to it.
+
+### Method 2: Connect to an already running server
+
+First, start the server in a separate terminal:
+
+```bash
+cd server
+cargo run
+```
+
+Then, in another terminal, run the client with the `--connect` flag:
+
+```bash
+cd client
+cargo run -- --connect --name "Your Name"
+```
+
+### Interactive Mode
+
+To run the client in interactive mode:
+
+```bash
+cd client
+cargo run -- --interactive
+```
+
+This will prompt you for input and display the server's responses.
+
+### Additional Options
+
+- `--debug`: Enable debug logging
+- `--timeout <SECONDS>`: Set the timeout for operations (default: 30 seconds)
+- `--server-cmd <COMMAND>`: Specify a custom server command
+
+## Testing
+
+Run the test script to verify that everything is working correctly:
+
+```bash
+./test.sh
+```
+
+This will run tests for all connection methods.
+
+## Extending the Project
+
+You can extend this project by:
+
+1. Adding more tools to the server
+2. Enhancing the client with additional features
+3. Implementing more sophisticated error handling
+4. Adding authentication and security features
+
+## Troubleshooting
+
+If you encounter issues:
+
+1. Enable debug logging with the `--debug` flag
+2. Check the server and client logs
+3. Verify that the server is running and accessible
+4. Ensure that the stdio pipes are properly connected
+
+## License
+
+This project is licensed under the terms of the MIT license.
 "#;
