@@ -2,6 +2,8 @@
 
 A Rust implementation of Anthropic's [Model Context Protocol (MCP)](https://docs.anthropic.com/claude/docs/model-context-protocol), an open standard for connecting AI assistants to data sources and tools.
 
+> **⚠️ IMPORTANT NOTICE**: Version 0.2.0 has been yanked due to critical issues with the SSE transport implementation. Please use version 0.2.1 instead, which includes important fixes for client-server communication, message handling, and template generation. If you're already using 0.2.0, we strongly recommend upgrading to 0.2.1 to avoid potential issues.
+
 ## Features
 
 - **Schema Definitions**: Complete implementation of the MCP schema
@@ -21,7 +23,7 @@ Add MCPR to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mcpr = "0.2.0"
+mcpr = "0.2.1"  # Make sure to use 0.2.1 or later, as 0.2.0 has been yanked
 ```
 
 For CLI tools, install globally:
