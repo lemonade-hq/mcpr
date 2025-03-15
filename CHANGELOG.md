@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - 2025-03-15
+## [0.2.1] - 2025-03-15
 
 ### Added
 - Server-Sent Events (SSE) transport implementation
@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Step-by-step instructions for generating and testing projects
   - Examples of expected output for both transport types
   - Common issues and their solutions
+
+### Note
+- Version 0.2.0 was yanked and replaced with 0.2.1 with the same features and fixes
 
 ## [0.1.0] - 2024-03-12
 
