@@ -6,20 +6,15 @@ pub const PROJECT_SERVER_TEMPLATE: &str = r#"//! MCP Server for {{name}} project
 use clap::Parser;
 use mcpr::{
     error::MCPError,
-    schema::{
-        common::{Tool, ToolInputSchema},
-        json_rpc::{JSONRPCMessage, JSONRPCRequest, RequestId},
-    },
+    schema::common::{Tool, ToolInputSchema},
     transport::{
         stdio::StdioTransport,
         Transport,
     },
 };
-use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use log::{info, error, debug, warn};
 
 /// CLI arguments
@@ -405,7 +400,6 @@ use serde_json::Value;
 use std::error::Error;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use log::{info, error, debug, warn};
@@ -605,10 +599,8 @@ fn connect_to_running_server(command: &str, args: &[&str]) -> Result<(StdioTrans
     if let Some(stderr) = process.stderr.take() {
         let stderr_reader = BufReader::new(stderr);
         thread::spawn(move || {
-            for line in stderr_reader.lines() {
-                if let Ok(line) = line {
-                    debug!("Server stderr: {}", line);
-                }
+            for line in stderr_reader.lines().map_while(Result::ok) {
+                debug!("Server stderr: {}", line);
             }
         });
     }
@@ -640,10 +632,8 @@ fn start_and_connect_to_server(server_cmd: &str) -> Result<(StdioTransport, Opti
     if let Some(stderr) = server_process.stderr.take() {
         let stderr_reader = BufReader::new(stderr);
         thread::spawn(move || {
-            for line in stderr_reader.lines() {
-                if let Ok(line) = line {
-                    debug!("Server stderr: {}", line);
-                }
+            for line in stderr_reader.lines().map_while(Result::ok) {
+                debug!("Server stderr: {}", line);
             }
         });
     }
@@ -691,7 +681,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("Operation timeout set to {} seconds", args.timeout);
     
     // Create transport and server process based on connection mode
-    let (transport, mut server_process) = if args.connect {
+    let (transport, server_process) = if args.connect {
         info!("Connecting to already running server");
         connect_to_running_server(&args.server_cmd, &[])?
     } else {
@@ -704,7 +694,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Initialize the client with timeout
     info!("Initializing client...");
     let start_time = Instant::now();
-    let init_result = loop {
+    let _init_result = loop {
         if start_time.elapsed() >= timeout {
             error!("Initialization timed out after {:?}", timeout);
             return Err(Box::new(io::Error::new(
@@ -943,124 +933,4 @@ rm connect_output.txt
 kill $SERVER_PID
 
 echo -e "${GREEN}All tests completed successfully!${NC}"
-"#;
-
-/// Template for project README.md with stdio transport
-pub const PROJECT_README_TEMPLATE: &str = r#"# {{name}} MCP Project
-
-This project demonstrates how to build a simple MCP (Machine Comprehension Protocol) client-server application using stdio transport.
-
-## Features
-
-- **Robust Communication**: Reliable stdio transport with proper error handling and timeout management
-- **Multiple Connection Methods**: Connect to an already running server or start a new server process
-- **Interactive Mode**: Choose tools and provide parameters interactively
-- **One-shot Mode**: Run queries directly from the command line
-- **Comprehensive Logging**: Detailed logging for debugging and monitoring
-
-## Project Structure
-
-- `client/`: The MCP client implementation
-- `server/`: The MCP server implementation with tools
-
-## Building the Project
-
-To build both the client and server:
-
-```bash
-# Build the server
-cd server
-cargo build
-
-# Build the client
-cd ../client
-cargo build
-```
-
-## Running the Server
-
-The server can be run in standalone mode:
-
-```bash
-cd server
-cargo run
-```
-
-## Using the Client
-
-The client can connect to the server in two ways:
-
-### Method 1: Start a new server process
-
-```bash
-cd client
-cargo run -- --name "Your Name"
-```
-
-This will start a new server process and connect to it.
-
-### Method 2: Connect to an already running server
-
-First, start the server in a separate terminal:
-
-```bash
-cd server
-cargo run
-```
-
-Then, in another terminal, run the client with the `--connect` flag:
-
-```bash
-cd client
-cargo run -- --connect --name "Your Name"
-```
-
-### Interactive Mode
-
-To run the client in interactive mode:
-
-```bash
-cd client
-cargo run -- --interactive
-```
-
-This will prompt you for input and display the server's responses.
-
-### Additional Options
-
-- `--debug`: Enable debug logging
-- `--timeout <SECONDS>`: Set the timeout for operations (default: 30 seconds)
-- `--server-cmd <COMMAND>`: Specify a custom server command
-
-## Testing
-
-Run the test script to verify that everything is working correctly:
-
-```bash
-./test.sh
-```
-
-This will run tests for all connection methods.
-
-## Extending the Project
-
-You can extend this project by:
-
-1. Adding more tools to the server
-2. Enhancing the client with additional features
-3. Implementing more sophisticated error handling
-4. Adding authentication and security features
-
-## Troubleshooting
-
-If you encounter issues:
-
-1. Enable debug logging with the `--debug` flag
-2. Check the server and client logs
-3. Verify that the server is running and accessible
-4. Ensure that the stdio pipes are properly connected
-
-## License
-
-This project is licensed under the terms of the MIT license.
 "#;
