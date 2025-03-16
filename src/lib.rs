@@ -107,6 +107,9 @@
 //! # }
 //! ```
 
+/// Current version of the MCPR crate
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod cli;
 pub mod client;
 pub mod generator;

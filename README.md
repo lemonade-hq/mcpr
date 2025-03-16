@@ -2,7 +2,7 @@
 
 A Rust implementation of Anthropic's [Model Context Protocol (MCP)](https://docs.anthropic.com/claude/docs/model-context-protocol), an open standard for connecting AI assistants to data sources and tools.
 
-> **⚠️ IMPORTANT NOTICE**: Version 0.2.0 has been yanked due to critical issues with the SSE transport implementation. Please use version 0.2.2 instead, which includes important fixes for client-server communication, message handling, and template generation. If you're already using 0.2.0, we strongly recommend upgrading to 0.2.2 to avoid potential issues.
+> **⚠️ IMPORTANT NOTICE**: Version 0.2.0 has been yanked due to critical issues with the SSE transport implementation. Please use version 0.2.3 instead, which includes important fixes for client-server communication, message handling, and template generation. If you're already using 0.2.0, we strongly recommend upgrading to 0.2.3 to avoid potential issues.
 
 ## Examples
 
@@ -31,7 +31,7 @@ Add MCPR to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mcpr = "0.2.2"  # Make sure to use 0.2.2 or later, as 0.2.0 has been yanked
+mcpr = "0.2.3"  # Make sure to use 0.2.3 or later, as 0.2.0 has been yanked
 ```
 
 For CLI tools, install globally:
@@ -142,6 +142,27 @@ my-project/
 ├── test_client.sh      # Client-only test script
 └── run_tests.sh        # Script to run all tests
 ```
+
+### Local Development with Templates
+
+When developing with generated templates, you can switch between using the published crate version and your local development version:
+
+```toml
+# In the generated Cargo.toml files (both client and server)
+
+# For local development, uncomment this line and comment out the crates.io version:
+# mcpr = { path = "/path/to/your/mcpr" }
+
+# For production, use version from crates.io:
+mcpr = "0.2.3"
+```
+
+This allows you to:
+1. Test your local MCPR changes with generated projects
+2. Easily switch back to the stable published version
+3. Develop and test new features in isolation
+
+The template generator automatically uses the current crate version, ensuring that generated projects always reference the latest release.
 
 ### Building Projects
 
@@ -368,11 +389,13 @@ Note: The `--output` parameter specifies where to create the project directory. 
 
 1. **Dependency Issues**:
    
-   If you encounter dependency errors when building generated projects, you may need to update the `Cargo.toml` files to point to your local MCPR crate:
+   If you encounter dependency errors when building generated projects, you may need to update the `Cargo.toml` files to point to your local MCPR crate (see the [Local Development with Templates](#local-development-with-templates) section):
 
    ```toml
-   # For local development, use path dependency:
+   # For local development, uncomment this line:
    mcpr = { path = "/path/to/your/mcpr" }
+   # And comment out the crates.io version:
+   # mcpr = "0.2.3"
    ```
 
 2. **Port Already in Use**:
