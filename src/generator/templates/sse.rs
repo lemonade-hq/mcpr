@@ -6,20 +6,15 @@ pub const PROJECT_SERVER_TEMPLATE: &str = r#"//! MCP Server for {{name}} project
 use clap::Parser;
 use mcpr::{
     error::MCPError,
-    schema::{
-        common::{Tool, ToolInputSchema},
-        json_rpc::{JSONRPCMessage, JSONRPCRequest, RequestId},
-    },
+    schema::common::{Tool, ToolInputSchema},
     transport::{
         sse::SSETransport,
         Transport,
     },
 };
-use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use log::{info, error, debug, warn};
 
 /// CLI arguments
@@ -404,8 +399,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
-use log::{info, error, debug, warn};
+use log::{info, error, debug};
 
 /// CLI arguments
 #[derive(Parser)]
@@ -605,7 +599,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     // Initialize the client
     info!("Initializing client...");
-    let init_result = match client.initialize() {
+    let _init_result = match client.initialize() {
         Ok(result) => {
             info!("Server info: {:?}", result);
             result
