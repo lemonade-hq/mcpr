@@ -1,5 +1,5 @@
 use crate::error::MCPError;
-use crate::transport::Transport;
+use crate::transport::{CloseCallback, ErrorCallback, MessageCallback, Transport};
 use log::{debug, error, info, warn};
 use reqwest::blocking::{Client, Response};
 use serde::{de::DeserializeOwned, Serialize};
@@ -21,9 +21,9 @@ pub struct SSETransport {
     uri: String,
     is_connected: bool,
     is_server: bool,
-    on_close: Option<Box<dyn Fn() + Send + Sync>>,
-    on_error: Option<Box<dyn Fn(&MCPError) + Send + Sync>>,
-    on_message: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    on_close: Option<CloseCallback>,
+    on_error: Option<ErrorCallback>,
+    on_message: Option<MessageCallback>,
     // HTTP client for making requests
     #[allow(dead_code)]
     client: Client,
@@ -343,7 +343,7 @@ impl Transport for SSETransport {
 
             // Register with the server
             debug!("Client registering with server at {}/register", uri);
-            match client.get(&format!("{}/register", uri)).send() {
+            match client.get(format!("{}/register", uri)).send() {
                 Ok(response) => {
                     if response.status().is_success() {
                         // Parse the client ID from the response
@@ -497,12 +497,12 @@ impl Transport for SSETransport {
                     }
                 }
                 debug!("Server successfully added message to client queues");
-                return Ok(());
+                Ok(())
             } else {
                 error!("Failed to lock active clients");
-                return Err(MCPError::Transport(
+                Err(MCPError::Transport(
                     "Failed to lock active clients".to_string(),
-                ));
+                ))
             }
         } else {
             // Client mode - send a POST request to the server
@@ -518,20 +518,20 @@ impl Transport for SSETransport {
                 Ok(response) => {
                     if response.status().is_success() {
                         debug!("Client successfully sent message to server");
-                        return Ok(());
+                        Ok(())
                     } else {
                         let error_msg = format!(
                             "Failed to send message to server: HTTP {}",
                             response.status()
                         );
                         error!("{}", error_msg);
-                        return Err(MCPError::Transport(error_msg));
+                        Err(MCPError::Transport(error_msg))
                     }
                 }
                 Err(e) => {
                     let error_msg = format!("Failed to send message to server: {}", e);
                     error!("{}", error_msg);
-                    return Err(MCPError::Transport(error_msg));
+                    Err(MCPError::Transport(error_msg))
                 }
             }
         }
@@ -625,12 +625,12 @@ impl Transport for SSETransport {
         Ok(())
     }
 
-    fn set_on_close(&mut self, callback: Option<Box<dyn Fn() + Send + Sync>>) {
+    fn set_on_close(&mut self, callback: Option<CloseCallback>) {
         debug!("Setting on_close callback for SSE transport");
         self.on_close = callback;
     }
 
-    fn set_on_error(&mut self, callback: Option<Box<dyn Fn(&MCPError) + Send + Sync>>) {
+    fn set_on_error(&mut self, callback: Option<ErrorCallback>) {
         debug!("Setting on_error callback for SSE transport");
         self.on_error = callback;
     }

@@ -85,7 +85,7 @@ impl<T: Transport> Client<T> {
                 })?;
 
                 // Parse the result
-                serde_json::from_value(result.clone()).map_err(|e| MCPError::Serialization(e))
+                serde_json::from_value(result.clone()).map_err(MCPError::Serialization)
             }
             JSONRPCMessage::Error(err) => {
                 Err(MCPError::Protocol(format!("Tool call failed: {:?}", err)))

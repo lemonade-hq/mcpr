@@ -49,22 +49,53 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Parse command line arguments
     let args = Args::parse();
-    
+
+    // Initialize logging
     if args.debug {
-        println!("Debug mode enabled");
+        std::env::set_var("RUST_LOG", "debug,mcpr=debug");
+    } else {
+        std::env::set_var("RUST_LOG", "info,mcpr=info");
     }
-    
-    println!("Starting MCP server: {{name}}");
-    
-    // Create a transport for communication
-    let mut transport = StdioTransport::new();
-    
-    // Wait for initialize request
-    let message: JSONRPCMessage = transport.receive()?;
-    
-    // Server implementation here...
-    
+    env_logger::init();
+
+    // Create a transport
+    let transport = StdioTransport::new();
+
+    // Create a server
+    let mut server = mcpr::server::Server::new(
+        mcpr::server::ServerConfig::new()
+            .with_name("{{name}}")
+            .with_version("0.1.0")
+            .with_tool(Tool {
+                name: "hello".to_string(),
+                description: "A simple tool that greets a person by name".to_string(),
+                parameters_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The name of the person to greet"
+                        }
+                    },
+                    "required": ["name"]
+                }),
+            }),
+    );
+
+    // Register tool handlers
+    server.register_tool_handler("hello", |params| {
+        let name = params["name"].as_str().unwrap_or("World");
+        Ok(json!({
+            "message": format!("Hello, {}!", name)
+        }))
+    })?;
+
+    // Start the server
+    info!("Starting MCP server");
+    server.start(transport)?;
+
     Ok(())
 }
 "#;
@@ -77,7 +108,7 @@ edition = "2021"
 description = "MCP server generated using mcpr CLI"
 
 [dependencies]
-mcpr = "0.2.0"
+mcpr = "0.2.3"
 clap = { version = "4.4", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
@@ -88,9 +119,9 @@ env_logger = "0.10"
 pub const CLIENT_MAIN_TEMPLATE: &str = r#"//! MCP Client: {{name}}
 
 use clap::Parser;
-use mcpr::schema::{JSONRPCMessage, JSONRPCRequest, RequestId};
+use mcpr::client::Client;
 use mcpr::transport::stdio::StdioTransport;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::error::Error;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
@@ -103,24 +134,111 @@ struct Args {
     /// Enable debug output
     #[arg(short, long)]
     debug: bool,
-    
-    /// Server URI
+
+    /// Run in interactive mode
     #[arg(short, long)]
-    uri: String,
+    interactive: bool,
+
+    /// Name to greet (for non-interactive mode)
+    #[arg(short, long)]
+    name: Option<String>,
+
+    /// Connect to an existing server
+    #[arg(short, long)]
+    connect: bool,
+
+    /// Server command to run
+    #[arg(long, default_value = "../server/target/debug/{{name}}")]
+    server_cmd: String,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    // Parse command line arguments
     let args = Args::parse();
-    
+
+    // Initialize logging
     if args.debug {
-        println!("Debug mode enabled");
+        std::env::set_var("RUST_LOG", "debug,mcpr=debug");
+    } else {
+        std::env::set_var("RUST_LOG", "info,mcpr=info");
     }
+    env_logger::init();
+
+    // Create a transport
+    let transport = if args.connect {
+        info!("Connecting to existing server");
+        StdioTransport::new()
+    } else {
+        info!("Starting server process: {}", args.server_cmd);
+        let server_process = Command::new(&args.server_cmd)
+            .stdout(Stdio::piped())
+            .stdin(Stdio::piped())
+            .spawn()?;
+        
+        StdioTransport::from_process(server_process)
+    };
+
+    // Create a client
+    let mut client = Client::new(transport);
+
+    // Initialize the client
+    info!("Initializing client");
+    let init_result = client.initialize()?;
+    info!("Connected to server: {} v{}", init_result.name, init_result.version);
     
-    println!("Starting MCP client: {{name}}");
-    println!("Connecting to server: {}", args.uri);
-    
-    // Client implementation here...
-    
+    if let Some(tools) = init_result.capabilities.tools {
+        info!("Available tools:");
+        for tool in tools.tools {
+            info!("  - {}: {}", tool.name, tool.description);
+        }
+    }
+
+    if args.interactive {
+        // Interactive mode
+        loop {
+            print!("Enter tool name (or 'exit' to quit): ");
+            io::stdout().flush()?;
+            
+            let mut tool_name = String::new();
+            io::stdin().read_line(&mut tool_name)?;
+            let tool_name = tool_name.trim();
+            
+            if tool_name == "exit" {
+                break;
+            }
+            
+            if tool_name == "hello" {
+                print!("Enter name to greet: ");
+                io::stdout().flush()?;
+                
+                let mut name = String::new();
+                io::stdin().read_line(&mut name)?;
+                let name = name.trim();
+                
+                let result: Value = client.call_tool(tool_name, &json!({
+                    "name": name
+                }))?;
+                
+                println!("Result: {}", result["message"]);
+            } else {
+                println!("Unknown tool: {}", tool_name);
+            }
+        }
+    } else if let Some(name) = args.name {
+        // One-shot mode
+        let result: Value = client.call_tool("hello", &json!({
+            "name": name
+        }))?;
+        
+        println!("{}", result["message"]);
+    } else {
+        println!("Please specify a name with --name or use --interactive mode");
+    }
+
+    // Shutdown the client
+    info!("Shutting down client");
+    client.shutdown()?;
+
     Ok(())
 }
 "#;
@@ -133,7 +251,7 @@ edition = "2021"
 description = "MCP client generated using mcpr CLI"
 
 [dependencies]
-mcpr = "0.2.0"
+mcpr = "0.2.3"
 clap = { version = "4.4", features = ["derive"] }
 serde_json = "1.0"
 log = "0.4"
@@ -143,64 +261,108 @@ env_logger = "0.10"
 // Common templates that are not transport-specific
 pub const SERVER_README_TEMPLATE: &str = r#"# {{name}}
 
-An MCP server generated using the mcpr CLI.
+An MCP server implementation generated using the MCPR CLI.
 
-## Running the Server
+## Features
+
+- Implements the Model Context Protocol (MCP)
+- Provides a simple "hello" tool for demonstration
+- Configurable logging levels
+
+## Building
+
+```bash
+cargo build
+```
+
+## Running
 
 ```bash
 cargo run
 ```
 
-## Connecting to the Server
-
-You can connect to this server using any MCP client. For example:
-
-```bash
-mcpr connect --uri stdio://./target/debug/{{name}}
-```
-
 ## Available Tools
 
-This server provides the following tools:
+- `hello`: A simple tool that greets a person by name
 
-- `example`: A simple example tool that processes a query string
+## Adding New Tools
+
+To add a new tool, modify the `main.rs` file:
+
+1. Add a new tool definition in the server configuration
+2. Register a handler for the tool
+3. Implement the tool's functionality in the handler
+
+## Configuration
+
+- `--debug`: Enable debug logging
 "#;
 
 pub const CLIENT_README_TEMPLATE: &str = r#"# {{name}}
 
-An MCP client generated using the mcpr CLI.
+An MCP client implementation generated using the MCPR CLI.
 
-## Running the Client
+## Features
+
+- Implements the Model Context Protocol (MCP)
+- Supports both interactive and one-shot modes
+- Can connect to an existing server or start a new server process
+- Configurable logging levels
+
+## Building
 
 ```bash
-cargo run -- --uri <server_uri>
+cargo build
 ```
 
-For example, to connect to a local server:
+## Running
+
+### Interactive Mode
 
 ```bash
-cargo run -- --uri stdio://./path/to/server
+cargo run -- --interactive
 ```
 
-## Usage
+### One-shot Mode
 
-Once connected, you can enter queries that will be processed by the server's tools.
-Type 'exit' to quit the client.
+```bash
+cargo run -- --name "Your Name"
+```
+
+### Connecting to an Existing Server
+
+```bash
+cargo run -- --connect --name "Your Name"
+```
+
+## Configuration
+
+- `--debug`: Enable debug logging
+- `--interactive`: Run in interactive mode
+- `--name <NAME>`: Name to greet (for non-interactive mode)
+- `--connect`: Connect to an existing server
+- `--server-cmd <CMD>`: Server command to run (default: "../server/target/debug/{{name}}")
 "#;
 
 pub const PROJECT_README_SSE_TEMPLATE: &str = r#"# {{name}} - MCP Project
 
-A complete MCP project with both client and server components, using sse transport.
+A complete MCP project with both client and server components, using SSE transport.
 
-This example demonstrates the use of the SSE transport implementation in MCPR, which has been enhanced to properly handle client-server communication with robust error handling and proper shutdown procedures.
+## Features
+
+- **Server-Sent Events Transport**: HTTP-based transport with proper client registration and message handling
+- **Multiple Client Support**: Server can handle multiple clients simultaneously
+- **Interactive Mode**: Choose tools and provide parameters interactively
+- **One-shot Mode**: Run queries directly from the command line
+- **Comprehensive Logging**: Detailed logging for debugging and monitoring
 
 ## Project Structure
 
-- `server/`: The MCP server implementation
 - `client/`: The MCP client implementation
+- `server/`: The MCP server implementation with tools
 - `test.sh`: A test script to run both client and server
 
-## Building the Project
+## Building
 
 ```bash
 # Build the server
@@ -212,23 +374,30 @@ cd ../client
 cargo build
 ```
 
-## Running the Server
+## Running
+
+### Start the Server
 
 ```bash
 cd server
-RUST_LOG=debug,mcpr=trace cargo run -- --port 8081
+cargo run -- --port 8080
 ```
 
-## Running the Client
+### Run the Client
 
 ```bash
 cd client
-RUST_LOG=debug,mcpr=trace cargo run -- --uri "http://localhost:8081" --name "Your Name"
+cargo run -- --uri "http://localhost:8080" --name "Your Name"
 ```
 
-## Running the Test Script
+### Interactive Mode
 
-The test script will build and run both the server and client with debug logging enabled:
+```bash
+cd client
+cargo run -- --uri "http://localhost:8080" --interactive
+```
+
+## Testing
 
 ```bash
 ./test.sh
@@ -236,19 +405,7 @@ The test script will build and run both the server and client with debug logging
 
 ## Available Tools
 
-This server provides the following tools:
-
 - `hello`: A simple tool that greets a person by name
-
-## SSE Transport Features
-
-The SSE transport implementation in this example includes:
-
-1. Robust client-server communication using HTTP
-2. Proper handling of client registration and message polling
-3. Graceful shutdown with proper cleanup of resources
-4. Detailed logging for debugging
-5. Error handling for network issues and JSON serialization/deserialization
 "#;
 
 pub const PROJECT_README_STDIO_TEMPLATE: &str = r#"# {{name}} - MCP Project
@@ -267,10 +424,9 @@ A complete MCP project with both client and server components, using stdio trans
 
 - `client/`: The MCP client implementation
 - `server/`: The MCP server implementation with tools
+- `test.sh`: A test script to run both client and server
 
-## Building the Project
-
-To build both the client and server:
+## Building
 
 ```bash
 # Build the server
@@ -282,245 +438,30 @@ cd ../client
 cargo build
 ```
 
-## Running the Server
+## Running
 
-The server can be run in standalone mode:
-
-```bash
-cd server
-cargo run
-```
-
-## Using the Client
-
-The client can connect to the server in two ways:
-
-### Method 1: Start a new server process
-
-```bash
-cd client
-cargo run -- --name "Your Name"
-```
-
-This will start a new server process and connect to it.
-
-### Method 2: Connect to an already running server
-
-First, start the server in a separate terminal:
+### Start the Server
 
 ```bash
 cd server
-cargo run
-```
-
-Then, in another terminal, run the client with the `--connect` flag:
-
-```bash
-cd client
-cargo run -- --connect --name "Your Name"
-```
-
-### Interactive Mode
-
-To run the client in interactive mode:
-
-```bash
-cd client
-cargo run -- --interactive
-```
-
-This will prompt you for input and display the server's responses.
-
-### Additional Options
-
-- `--debug`: Enable debug logging
-- `--timeout <SECONDS>`: Set the timeout for operations (default: 30 seconds)
-- `--server-cmd <COMMAND>`: Specify a custom server command
-
-## Testing
-
-Run the test script to verify that everything is working correctly:
-
-```bash
-./test.sh
-```
-
-This will run tests for all connection methods.
-
-## Extending the Project
-
-You can extend this project by:
-
-1. Adding more tools to the server
-2. Enhancing the client with additional features
-3. Implementing more sophisticated error handling
-4. Adding authentication and security features
-
-## Troubleshooting
-
-If you encounter issues:
-
-1. Enable debug logging with the `--debug` flag
-2. Check the server and client logs
-3. Verify that the server is running and accessible
-4. Ensure that the stdio pipes are properly connected
-
-## Available Tools
-
-This server provides the following tools:
-
-- `hello`: A simple tool that greets a person by name
-"#;
-
-// For templates that might be used in the future, we'll keep them but mark them with #[allow(dead_code)]
-#[allow(dead_code)]
-pub const PROJECT_README_WEBSOCKET_TEMPLATE: &str = r#"# {{name}} - MCP Project
-
-A complete MCP project with both client and server components, using WebSocket transport (Coming Soon).
-
-**Note: The WebSocket transport is currently under development and not yet available.**
-
-This example will demonstrate the use of the WebSocket transport implementation in MCPR, which will provide real-time bidirectional communication between client and server with robust error handling and proper shutdown procedures.
-
-## Project Structure
-
-```
-{{name}}/
-├── client/             # Client implementation
-│   ├── src/
-│   │   └── main.rs     # Client code
-│   └── Cargo.toml      # Client dependencies
-├── server/             # Server implementation
-│   ├── src/
-│   │   └── main.rs     # Server code
-│   └── Cargo.toml      # Server dependencies
-└── test.sh             # Test script
-```
-
-## WebSocket Transport Features (Coming Soon)
-
-The WebSocket transport implementation will include:
-1. Full-duplex communication between client and server
-2. Proper handling of WebSocket connections and message routing
-3. Automatic reconnection handling
-4. Error handling and logging
-5. Support for all MCP message types
-
-## Building and Running
-
-**Note: The WebSocket transport is currently under development and not yet available.**
-
-Once implemented, you will be able to:
-
-### Build the Server
-
-```bash
-cd {{name}}/server
-cargo build
-```
-
-### Build the Client
-
-```bash
-cd {{name}}/client
-cargo build
-```
-
-### Run the Server
-
-```bash
-cd {{name}}/server
 cargo run
 ```
 
 ### Run the Client
 
 ```bash
-cd {{name}}/client
-cargo run
+cd client
+cargo run -- --name "Your Name"
 ```
 
-### Run the Tests
-
-```bash
-cd {{name}}
-./test.sh
-```
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-"#;
-
-#[allow(dead_code)]
-pub const PROJECT_README_TEMPLATE: &str = r#"# {{name}} - MCP Project
-
-A complete MCP project with both client and server components, using {{transport_type}} transport.
-
-{{#if_eq transport_type "sse"}}
-This example demonstrates the use of the SSE transport implementation in MCPR, which has been enhanced to properly handle client-server communication with robust error handling and proper shutdown procedures.
-{{/if_eq}}
-
-{{#if_eq transport_type "websocket"}}
-This example demonstrates the use of the WebSocket transport implementation in MCPR, which provides real-time bidirectional communication between client and server with robust error handling and proper shutdown procedures.
-{{/if_eq}}
-
-## Project Structure
-
-- `server/`: The MCP server implementation
-- `client/`: The MCP client implementation
-- `test.sh`: A test script to run both client and server
-
-## Building the Project
-
-```bash
-# Build the server
-cd server
-cargo build
-
-# Build the client
-cd ../client
-cargo build
-```
-
-## Running the Server
-
-```bash
-cd server
-{{#if_eq transport_type "sse"}}
-RUST_LOG=debug,mcpr=trace cargo run -- --port 8081
-{{/if_eq}}
-{{#if_eq transport_type "websocket"}}
-RUST_LOG=debug,mcpr=trace cargo run -- --port 8081
-{{/if_eq}}
-{{#if_eq transport_type "stdio"}}
-cargo run
-{{/if_eq}}
-```
-
-## Running the Client
+### Interactive Mode
 
 ```bash
 cd client
-{{#if_eq transport_type "sse"}}
-RUST_LOG=debug,mcpr=trace cargo run -- --uri "http://localhost:8081" --name "Your Name"
-{{/if_eq}}
-{{#if_eq transport_type "websocket"}}
-RUST_LOG=debug,mcpr=trace cargo run -- --uri "ws://localhost:8081" --name "Your Name"
-{{/if_eq}}
-{{#if_eq transport_type "stdio"}}
 cargo run -- --interactive
-{{/if_eq}}
 ```
 
-## Running the Test Script
-
-{{#if_eq transport_type "sse"}}
-The test script will build and run both the server and client with debug logging enabled:
-{{/if_eq}}
-{{#if_eq transport_type "websocket"}}
-The test script will build and run both the server and client with debug logging enabled:
-{{/if_eq}}
+## Testing
 
 ```bash
 ./test.sh
@@ -528,84 +469,5 @@ The test script will build and run both the server and client with debug logging
 
 ## Available Tools
 
-This server provides the following tools:
-
 - `hello`: A simple tool that greets a person by name
-
-{{#if_eq transport_type "sse"}}
-## SSE Transport Features
-
-The SSE transport implementation in this example includes:
-
-1. Robust client-server communication using HTTP
-2. Proper handling of client registration and message polling
-3. Graceful shutdown with proper cleanup of resources
-4. Detailed logging for debugging
-5. Error handling for network issues and JSON serialization/deserialization
-{{/if_eq}}
-
-{{#if_eq transport_type "websocket"}}
-## WebSocket Transport Features
-
-The WebSocket transport implementation in this example includes:
-
-1. Real-time bidirectional communication between client and server
-2. Proper handling of WebSocket connections and message routing
-3. Graceful shutdown with proper cleanup of resources
-4. Detailed logging for debugging
-5. Error handling for network issues and JSON serialization/deserialization
-{{/if_eq}}
-"#;
-
-#[allow(dead_code)]
-pub const PROJECT_RUN_TESTS_TEMPLATE: &str = r#"#!/bin/bash
-
-# Run all tests for {{name}} MCP project
-
-# Exit on error
-set -e
-
-echo "Running server tests..."
-./test_server.sh
-
-echo "Running client tests..."
-./test_client.sh
-
-echo "All tests completed successfully!"
-"#;
-
-#[allow(dead_code)]
-pub const PROJECT_SERVER_TEST_TEMPLATE: &str = r#"#!/bin/bash
-
-# Server tests for {{name}} MCP project
-
-# Exit on error
-set -e
-
-echo "Building server..."
-cd server
-cargo build
-
-echo "Running server tests..."
-cargo test
-
-echo "Server tests completed successfully!"
-"#;
-
-#[allow(dead_code)]
-pub const PROJECT_CLIENT_TEST_TEMPLATE: &str = r#"#!/bin/bash
-
-# Client tests for {{name}} MCP project
-
-# Exit on error
-set -e
-
-echo "Building client..."
-cd client
-cargo build
-
-echo "Running client tests..."
-cargo test
-
-echo "Client tests completed successfully!"
 "#;

@@ -6,6 +6,9 @@ use std::path::Path;
 
 mod templates;
 
+// Import the crate version from the environment
+use crate::VERSION;
+
 /// Error type for generator operations
 #[derive(Debug, thiserror::Error)]
 pub enum GeneratorError {
@@ -166,7 +169,9 @@ fn generate_server_main(server_dir: &Path, name: &str) -> Result<(), GeneratorEr
 fn generate_server_cargo_toml(server_dir: &Path, name: &str) -> Result<(), GeneratorError> {
     let cargo_toml = server_dir.join("Cargo.toml");
 
-    let content = templates::SERVER_CARGO_TEMPLATE.replace("{{name}}", name);
+    let content = templates::SERVER_CARGO_TEMPLATE
+        .replace("{{name}}", name)
+        .replace("{{version}}", VERSION);
 
     fs::write(cargo_toml, content)?;
     Ok(())
@@ -194,7 +199,9 @@ fn generate_client_main(client_dir: &Path, name: &str) -> Result<(), GeneratorEr
 fn generate_client_cargo_toml(client_dir: &Path, name: &str) -> Result<(), GeneratorError> {
     let cargo_toml = client_dir.join("Cargo.toml");
 
-    let content = templates::CLIENT_CARGO_TEMPLATE.replace("{{name}}", name);
+    let content = templates::CLIENT_CARGO_TEMPLATE
+        .replace("{{name}}", name)
+        .replace("{{version}}", VERSION);
 
     fs::write(cargo_toml, content)?;
     Ok(())
@@ -252,7 +259,9 @@ fn generate_project_server(
         }
     };
 
-    let content = cargo_template.replace("{{name}}", name);
+    let content = cargo_template
+        .replace("{{name}}", name)
+        .replace("{{version}}", VERSION);
     fs::write(cargo_toml, content)?;
 
     Ok(())
@@ -301,7 +310,9 @@ fn generate_project_client(
         }
     };
 
-    let content = cargo_template.replace("{{name}}", name);
+    let content = cargo_template
+        .replace("{{name}}", name)
+        .replace("{{version}}", VERSION);
     fs::write(cargo_toml, content)?;
 
     Ok(())

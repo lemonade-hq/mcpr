@@ -23,6 +23,15 @@ use crate::error::MCPError;
 use serde::{de::DeserializeOwned, Serialize};
 use std::io;
 
+/// Type alias for a closure that is called when an error occurs
+pub type ErrorCallback = Box<dyn Fn(&MCPError) + Send + Sync>;
+
+/// Type alias for a closure that is called when a message is received
+pub type MessageCallback = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Type alias for a closure that is called when the connection is closed
+pub type CloseCallback = Box<dyn Fn() + Send + Sync>;
+
 /// Transport trait for MCP communication
 pub trait Transport {
     /// Start processing messages
@@ -38,10 +47,10 @@ pub trait Transport {
     fn close(&mut self) -> Result<(), MCPError>;
 
     /// Set callback for when the connection is closed
-    fn set_on_close(&mut self, callback: Option<Box<dyn Fn() + Send + Sync>>);
+    fn set_on_close(&mut self, callback: Option<CloseCallback>);
 
     /// Set callback for when an error occurs
-    fn set_on_error(&mut self, callback: Option<Box<dyn Fn(&MCPError) + Send + Sync>>);
+    fn set_on_error(&mut self, callback: Option<ErrorCallback>);
 
     /// Set callback for when a message is received
     fn set_on_message<F>(&mut self, callback: Option<F>)
@@ -59,9 +68,9 @@ pub mod stdio {
         reader: BufReader<Box<dyn io::Read + Send>>,
         writer: Box<dyn io::Write + Send>,
         is_connected: bool,
-        on_close: Option<Box<dyn Fn() + Send + Sync>>,
-        on_error: Option<Box<dyn Fn(&MCPError) + Send + Sync>>,
-        on_message: Option<Box<dyn Fn(&str) + Send + Sync>>,
+        on_close: Option<CloseCallback>,
+        on_error: Option<ErrorCallback>,
+        on_message: Option<MessageCallback>,
     }
 
     impl Default for StdioTransport {
@@ -194,11 +203,11 @@ pub mod stdio {
             Ok(())
         }
 
-        fn set_on_close(&mut self, callback: Option<Box<dyn Fn() + Send + Sync>>) {
+        fn set_on_close(&mut self, callback: Option<CloseCallback>) {
             self.on_close = callback;
         }
 
-        fn set_on_error(&mut self, callback: Option<Box<dyn Fn(&MCPError) + Send + Sync>>) {
+        fn set_on_error(&mut self, callback: Option<ErrorCallback>) {
             self.on_error = callback;
         }
 

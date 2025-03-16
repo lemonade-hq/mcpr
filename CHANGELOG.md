@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2025-03-20
+
+### Added
+- Comprehensive MCP.md documentation with Mermaid diagrams
+  - Detailed explanation of Model Context Protocol concepts
+  - Visual representation of client-server architecture
+  - Schema visualization for better understanding
+  - Implementation examples and best practices
+- Updated template generator to use the latest MCPR version
+  - Generated projects now automatically use the current crate version
+  - Templates include commented options for local development
+
+### Improved
+- Enhanced SSE transport template generation
+  - Fixed template structure for better developer experience
+  - Improved error handling in generated code
+  - Added more comprehensive comments for easier customization
+- Updated documentation for template usage
+  - Clearer instructions for generating projects
+  - Better examples of customizing templates
+- Added type aliases for complex callback types
+  - Improved code readability
+  - Addressed Clippy warnings for complex types
+
+### Fixed
+- Template generation issues for SSE transport
+  - Resolved path handling in generated projects
+  - Fixed dependency management in template projects
+- Minor code quality improvements
+  - Addressed Clippy warnings
+  - Enhanced code documentation
+
 ## [0.2.2] - 2025-03-15
 
 ### Added
