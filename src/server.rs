@@ -8,8 +8,8 @@ use crate::{
         common::{Implementation, Tool},
         json_rpc::{JSONRPCMessage, JSONRPCResponse, RequestId},
         server::{
-            CallToolResult, InitializeResult, ServerCapabilities, ToolCallResult,
-            ToolResultContent, ToolsCapability,
+            CallToolResult, InitializeResult, ServerCapabilities, ToolResultContent,
+            ToolsCapability,
         },
     },
     transport::Transport,
@@ -146,10 +146,6 @@ impl<T: Transport> Server<T> {
                             info!("Received initialization request");
                             self.handle_initialize(id, params)?;
                         }
-                        "tool_call" => {
-                            info!("Received tool call request");
-                            self.handle_tool_call(id, params)?;
-                        }
                         "tools/list" => {
                             info!("Received tools list request");
                             self.handle_tools_list(id, params)?;
@@ -228,55 +224,6 @@ impl<T: Transport> Server<T> {
 
         // Send the response
         transport.send(&JSONRPCMessage::Response(response))?;
-
-        Ok(())
-    }
-
-    /// Handle tool call request
-    fn handle_tool_call(&mut self, id: RequestId, params: Option<Value>) -> Result<(), MCPError> {
-        let transport = self
-            .transport
-            .as_mut()
-            .ok_or_else(|| MCPError::Protocol("Transport not initialized".to_string()))?;
-
-        // Extract tool name and parameters
-        let params = params.ok_or_else(|| {
-            MCPError::Protocol("Missing parameters in tool call request".to_string())
-        })?;
-
-        // Note: we keep using "name" and "parameters" as keys since that's what the incoming JSON will have
-        let tool_name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| MCPError::Protocol("Missing tool name in parameters".to_string()))?;
-
-        let tool_params = params.get("parameters").cloned().unwrap_or(Value::Null);
-
-        // Find the tool handler
-        let handler = self.tool_handlers.get(tool_name).ok_or_else(|| {
-            MCPError::Protocol(format!("No handler registered for tool '{}'", tool_name))
-        })?;
-
-        // Call the handler
-        match handler(tool_params) {
-            Ok(result) => {
-                // Create proper tool result
-                let tool_result = ToolCallResult { result };
-
-                // Create response with proper result
-                let response = JSONRPCResponse::new(
-                    id,
-                    serde_json::to_value(tool_result).map_err(MCPError::Serialization)?,
-                );
-
-                // Send the response
-                transport.send(&JSONRPCMessage::Response(response))?;
-            }
-            Err(e) => {
-                // Send error response
-                self.send_error(id, -32000, format!("Tool execution failed: {}", e), None)?;
-            }
-        }
 
         Ok(())
     }
