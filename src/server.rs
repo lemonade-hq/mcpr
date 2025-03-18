@@ -86,8 +86,8 @@ use crate::{
     transport::Transport,
 };
 use futures::future::join_all;
-use log::{error, info};
-use serde_json::Value;
+use log::{debug, error, info};
+use serde_json::{json, Value};
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::timeout};
 
@@ -285,6 +285,12 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
                             info!("Received tools list request");
                             if let Err(e) = self.handle_tools_list(id, params).await {
                                 error!("Error handling tools/list request: {}", e);
+                            }
+                        }
+                        "ping" => {
+                            debug!("Received ping request");
+                            if let Err(e) = self.handle_ping(id).await {
+                                error!("Error handling ping request: {}", e);
                             }
                         }
                         "tools/call" => {
@@ -506,6 +512,26 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
         drop(tool_handlers); // Release the lock before awaiting
 
         join_all(futures).await
+    }
+
+    /// Handle ping request
+    async fn handle_ping(&mut self, id: RequestId) -> Result<(), MCPError> {
+        let transport = self
+            .transport
+            .as_mut()
+            .ok_or_else(|| MCPError::Protocol("Transport not initialized".to_string()))?;
+
+        // Send a simple response for the ping
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {}
+        });
+
+        transport.send(&response).await?;
+        debug!("Sent ping response");
+
+        Ok(())
     }
 }
 
@@ -1095,6 +1121,69 @@ mod tests {
             }
 
             Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_ping() -> Result<(), MCPError> {
+        with_test_server(|_server, transport| async move {
+            // Queue initialization request first (server needs to be initialized)
+            transport
+                .queue_message(JSONRPCMessage::Request(JSONRPCRequest::new(
+                    RequestId::Number(1),
+                    "initialize".to_string(),
+                    Some(serde_json::json!({
+                        "protocol_version": LATEST_PROTOCOL_VERSION
+                    })),
+                )))
+                .await;
+
+            // Wait for initialization to process
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Discard initialization response
+            let _ = transport.get_last_sent().await;
+
+            // Queue ping request
+            transport
+                .queue_message(JSONRPCMessage::Request(JSONRPCRequest::new(
+                    RequestId::Number(2),
+                    "ping".to_string(),
+                    None,
+                )))
+                .await;
+
+            // Give server time to process
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // Check response
+            let response = transport
+                .get_last_sent()
+                .await
+                .ok_or_else(|| MCPError::Protocol("No response received".to_string()))?;
+
+            // Parse response and verify it contains expected data
+            let parsed: JSONRPCMessage =
+                serde_json::from_str(&response).map_err(|e| MCPError::Serialization(e))?;
+
+            match parsed {
+                JSONRPCMessage::Response(resp) => {
+                    // Verify the response has the correct ID
+                    assert_eq!(resp.id, RequestId::Number(2));
+
+                    // Verify the result is an empty object
+                    assert!(resp.result.is_object(), "Result should be an object");
+                    assert_eq!(
+                        resp.result.as_object().unwrap().len(),
+                        0,
+                        "Result should be an empty object"
+                    );
+
+                    Ok(())
+                }
+                _ => Err(MCPError::Protocol("Expected response message".to_string())),
+            }
         })
         .await
     }
