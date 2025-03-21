@@ -1,13 +1,15 @@
 use crate::error::MCPError;
 use crate::transport::{CloseCallback, ErrorCallback, MessageCallback, Transport};
+use async_trait::async_trait;
 use log::{debug, error, info, warn};
-use reqwest::blocking::{Client, Response};
+use reqwest::Client;
 use serde::{de::DeserializeOwned, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
-use tiny_http::{Method, Response as HttpResponse, Server};
+use tiny_http::{Method, Request, Response as HttpResponse, Server};
+use tokio::sync::{mpsc, Mutex as TokioMutex, Notify};
+use tokio::time::sleep;
 
 /// Client connection information
 struct ClientConnection {
@@ -25,20 +27,21 @@ pub struct SSETransport {
     on_error: Option<ErrorCallback>,
     on_message: Option<MessageCallback>,
     // HTTP client for making requests
-    #[allow(dead_code)]
     client: Client,
     // Queue for incoming messages
-    message_queue: Arc<Mutex<VecDeque<String>>>,
-    // Thread for polling SSE events
-    receiver_thread: Option<thread::JoinHandle<()>>,
+    message_queue: Arc<TokioMutex<VecDeque<String>>>,
     // For server mode: active client connections
     active_clients: Arc<Mutex<HashMap<String, ClientConnection>>>,
     // For server mode: client message queues
     client_messages: Arc<Mutex<HashMap<String, VecDeque<String>>>>,
     // For client mode: client ID
-    client_id: Arc<Mutex<Option<String>>>,
+    client_id: Arc<TokioMutex<Option<String>>>,
     // Server instance
     server: Option<Arc<Server>>,
+    // Signal to stop polling
+    stop_signal: Arc<Notify>,
+    // Polling task handle
+    polling_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SSETransport {
@@ -53,12 +56,13 @@ impl SSETransport {
             on_error: None,
             on_message: None,
             client: Client::new(),
-            message_queue: Arc::new(Mutex::new(VecDeque::new())),
-            receiver_thread: None,
+            message_queue: Arc::new(TokioMutex::new(VecDeque::new())),
             active_clients: Arc::new(Mutex::new(HashMap::new())),
             client_messages: Arc::new(Mutex::new(HashMap::new())),
-            client_id: Arc::new(Mutex::new(None)),
+            client_id: Arc::new(TokioMutex::new(None)),
             server: None,
+            stop_signal: Arc::new(Notify::new()),
+            polling_task: None,
         }
     }
 
@@ -69,46 +73,11 @@ impl SSETransport {
         transport.is_server = true;
         transport
     }
-
-    /// Handle an error by calling the error callback if set
-    #[allow(dead_code)]
-    fn handle_error(&self, error: &MCPError) {
-        error!("SSE transport error: {}", error);
-        if let Some(callback) = &self.on_error {
-            callback(error);
-        }
-    }
-
-    /// Process SSE events from a response
-    #[allow(dead_code)]
-    fn process_sse_events(&self, response: Response) {
-        let message_queue = Arc::clone(&self.message_queue);
-
-        // Read the response body line by line
-        let reader = response.text().unwrap_or_default();
-
-        // Process SSE events
-        for line in reader.lines() {
-            if line.starts_with("data: ") {
-                let data = line.trim_start_matches("data: ");
-                debug!("Received SSE event: {}", data);
-
-                // Add the message to the queue
-                if let Ok(mut queue) = message_queue.lock() {
-                    queue.push_back(data.to_string());
-                }
-
-                // Call the message callback if set
-                if let Some(callback) = &self.on_message {
-                    callback(data);
-                }
-            }
-        }
-    }
 }
 
+#[async_trait]
 impl Transport for SSETransport {
-    fn start(&mut self) -> Result<(), MCPError> {
+    async fn start(&mut self) -> Result<(), MCPError> {
         if self.is_connected {
             debug!("SSE transport already connected");
             return Ok(());
@@ -116,8 +85,9 @@ impl Transport for SSETransport {
 
         info!("Starting SSE transport with URI: {}", self.uri);
 
-        // Create a message queue for the receiver thread
+        // Create a message queue for the receiver task
         let message_queue = Arc::clone(&self.message_queue);
+        let stop_signal = Arc::clone(&self.stop_signal);
 
         if self.is_server {
             // Parse the URI to get the host and port
@@ -155,208 +125,114 @@ impl Transport for SSETransport {
             let server_arc = Arc::new(server);
             self.server = Some(Arc::clone(&server_arc));
 
-            // Start a thread to handle incoming requests
+            // Start a task to handle incoming requests
             let active_clients = Arc::clone(&self.active_clients);
             let client_messages = Arc::clone(&self.client_messages);
-            let server_thread = thread::spawn(move || {
-                let server = server_arc;
+            let (sender, mut receiver) = mpsc::channel::<String>(32);
 
-                for mut request in server.incoming_requests() {
-                    let method = request.method();
-                    let url = request.url().to_string();
+            // Spawn a task to process incoming HTTP requests
+            let server_arc_clone = Arc::clone(&server_arc);
+            let stop_signal_clone = Arc::clone(&stop_signal);
+            let active_clients_clone = Arc::clone(&active_clients);
+            let client_messages_clone = Arc::clone(&client_messages);
+            let sender_clone = sender.clone();
 
-                    debug!("Server received {} request for {}", method, url);
+            tokio::spawn(async move {
+                loop {
+                    // Check for stop signal with a small timeout
+                    let should_stop = tokio::time::timeout(
+                        Duration::from_millis(100),
+                        stop_signal_clone.notified(),
+                    )
+                    .await
+                    .is_ok();
 
-                    match (method, url.as_str()) {
-                        (Method::Post, "/") => {
-                            // Handle POST request (client sending a message to server)
-                            let mut content = String::new();
-                            if let Err(e) = request.as_reader().read_to_string(&mut content) {
-                                error!("Error reading request body: {}", e);
-                                let _ = request.respond(
-                                    HttpResponse::from_string("Error reading request")
-                                        .with_status_code(400),
-                                );
-                                continue;
-                            }
+                    if should_stop {
+                        debug!("Server task received stop signal");
+                        break;
+                    }
 
-                            debug!("Server received POST request body: {}", content);
+                    // Receive request (non-blocking)
+                    let server_for_recv = Arc::clone(&server_arc_clone);
+                    let request_result = tokio::task::spawn_blocking(move || {
+                        server_for_recv.recv_timeout(Duration::from_millis(50))
+                    })
+                    .await;
 
-                            // Add the message to the server's message queue for processing
-                            if let Ok(mut queue) = message_queue.lock() {
-                                queue.push_back(content);
-                                debug!("Added message to server queue for processing");
-                            }
+                    // Process the request if we got one
+                    if let Ok(result) = request_result {
+                        if let Ok(Some(request)) = result {
+                            // Extract method and URL from the request
+                            let method = request.method().clone();
+                            let url = request.url().to_string();
 
-                            // Send a success response
-                            let _ = request
-                                .respond(HttpResponse::from_string("OK").with_status_code(200));
-                        }
-                        (Method::Get, path) if path.starts_with("/poll") => {
-                            // Handle polling request from client
-                            debug!("Server received polling request: {}", path);
+                            debug!("Server received {} request for {}", method, url);
 
-                            // Extract client ID from query parameters
-                            let client_id = path.split('?').nth(1).and_then(|query| {
-                                query.split('&').find_map(|pair| {
-                                    let mut parts = pair.split('=');
-                                    if let Some(key) = parts.next() {
-                                        if key == "client_id" {
-                                            parts.next().map(|value| value.to_string())
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                })
+                            // Process request in a separate task to not block the main loop
+                            let sender_task = sender_clone.clone();
+                            let active_clients_task = Arc::clone(&active_clients_clone);
+                            let client_messages_task = Arc::clone(&client_messages_clone);
+
+                            tokio::spawn(async move {
+                                process_request(
+                                    request,
+                                    &method,
+                                    &url,
+                                    &sender_task,
+                                    &active_clients_task,
+                                    &client_messages_task,
+                                )
+                                .await;
                             });
-
-                            if let Some(client_id) = client_id {
-                                // Check if there are any messages in the client-specific queue
-                                let message = if let Ok(mut client_msgs) = client_messages.lock() {
-                                    client_msgs
-                                        .entry(client_id.clone())
-                                        .or_insert_with(VecDeque::new)
-                                        .pop_front()
-                                } else {
-                                    None
-                                };
-
-                                // Send the message or a no-message response
-                                if let Some(msg) = message {
-                                    debug!(
-                                        "Server sending message to client {}: {}",
-                                        client_id, msg
-                                    );
-                                    let response = HttpResponse::from_string(msg)
-                                        .with_status_code(200)
-                                        .with_header(tiny_http::Header {
-                                            field: "Content-Type".parse().unwrap(),
-                                            value: "application/json".parse().unwrap(),
-                                        });
-
-                                    if let Err(e) = request.respond(response) {
-                                        error!("Failed to send response to client: {}", e);
-                                    } else {
-                                        debug!("Server successfully sent response to client");
-                                    }
-                                } else {
-                                    // No messages available
-                                    debug!(
-                                        "Server sending no_messages response to client {}",
-                                        client_id
-                                    );
-                                    let response = HttpResponse::from_string("no_messages")
-                                        .with_status_code(200);
-
-                                    if let Err(e) = request.respond(response) {
-                                        error!("Failed to send no_messages response: {}", e);
-                                    }
-                                }
-
-                                // Update the client's last poll time
-                                if let Ok(mut clients) = active_clients.lock() {
-                                    if let Some(client) = clients.get_mut(&client_id) {
-                                        client.last_poll = Instant::now();
-                                    }
-                                }
-                            } else {
-                                // No client ID provided
-                                debug!("Client poll request missing client_id parameter");
-                                let response =
-                                    HttpResponse::from_string("Missing client_id parameter")
-                                        .with_status_code(400);
-                                let _ = request.respond(response);
-                            }
-                        }
-                        (Method::Get, "/register") => {
-                            // Handle client registration
-                            debug!("Server received client registration request");
-
-                            // Track the client connection
-                            let client_id = format!(
-                                "client-{}",
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis()
-                            );
-
-                            if let Ok(mut clients) = active_clients.lock() {
-                                clients.insert(
-                                    client_id.clone(),
-                                    ClientConnection {
-                                        id: client_id.clone(),
-                                        last_poll: Instant::now(),
-                                    },
-                                );
-                                debug!("Client registered: {}", client_id);
-                                debug!("Total connected clients: {}", clients.len());
-                            }
-
-                            // Initialize the client's message queue
-                            if let Ok(mut client_msgs) = client_messages.lock() {
-                                client_msgs
-                                    .entry(client_id.clone())
-                                    .or_insert_with(VecDeque::new);
-                                debug!("Initialized message queue for client {}", client_id);
-                            }
-
-                            // Send a success response
-                            let response = HttpResponse::from_string(format!(
-                                "{{\"client_id\":\"{}\"}}",
-                                client_id
-                            ))
-                            .with_status_code(200)
-                            .with_header(tiny_http::Header {
-                                field: "Content-Type".parse().unwrap(),
-                                value: "application/json".parse().unwrap(),
-                            });
-
-                            if let Err(e) = request.respond(response) {
-                                error!("Failed to send registration response: {}", e);
-                            } else {
-                                debug!("Server successfully registered client");
-                            }
-                        }
-                        _ => {
-                            // Unsupported method or path
-                            error!("Unsupported request: {} {}", method, url);
-                            let _ = request.respond(
-                                HttpResponse::from_string("Method or path not allowed")
-                                    .with_status_code(405),
-                            );
                         }
                     }
                 }
+                debug!("Server HTTP handler task exited");
             });
 
-            self.receiver_thread = Some(server_thread);
+            // Spawn a task to process messages received from clients
+            let message_queue_clone = Arc::clone(&message_queue);
+            let stop_signal_clone = Arc::clone(&stop_signal);
+            self.polling_task = Some(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        Some(content) = receiver.recv() => {
+                            // Add the message to the server's message queue for processing
+                            let mut queue = message_queue_clone.lock().await;
+                            queue.push_back(content);
+                            debug!("Added message to server queue for processing");
+                        }
+                        _ = stop_signal_clone.notified() => {
+                            debug!("Server message processing task received stop signal");
+                            break;
+                        }
+                    }
+                }
+                debug!("Server message processing task exited");
+            }));
         } else {
-            // Client mode - we'll use a simpler approach with polling
+            // For client mode - we'll use async polling
             let uri = self.uri.clone();
-            let client = Client::new();
-            let is_connected = Arc::new(Mutex::new(true));
-            let is_connected_clone = Arc::clone(&is_connected);
+            let client = self.client.clone();
             let client_id = Arc::clone(&self.client_id);
+            let message_queue_clone = Arc::clone(&message_queue);
+            let stop_signal_clone = Arc::clone(&stop_signal);
 
             // Register with the server
             debug!("Client registering with server at {}/register", uri);
-            match client.get(format!("{}/register", uri)).send() {
+            match client.get(format!("{}/register", uri)).send().await {
                 Ok(response) => {
                     if response.status().is_success() {
                         // Parse the client ID from the response
-                        match response.text() {
+                        match response.text().await {
                             Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
                                 Ok(json) => {
                                     if let Some(id) =
                                         json.get("client_id").and_then(|id| id.as_str())
                                     {
                                         debug!("Client registration successful with ID: {}", id);
-                                        if let Ok(mut client_id_guard) = client_id.lock() {
-                                            *client_id_guard = Some(id.to_string());
-                                        }
+                                        let mut client_id_guard = client_id.lock().await;
+                                        *client_id_guard = Some(id.to_string());
                                     } else {
                                         warn!(
                                             "Client registration response missing client_id field"
@@ -380,34 +256,33 @@ impl Transport for SSETransport {
                 }
             }
 
-            // Start a thread to poll for messages
+            // Start a task to poll for messages
             let client_id_clone = Arc::clone(&client_id);
-            let receiver_thread = thread::spawn(move || {
-                while let Ok(connected) = is_connected_clone.lock() {
-                    if !*connected {
-                        debug!("Polling thread detected transport closure, exiting");
-                        break;
-                    }
+            let uri_clone = uri.clone();
+            let client_clone = client.clone();
 
+            // Simplify: Just use a polling task that adds messages to the queue
+            // The main thread will handle processing callbacks when messages are received
+            self.polling_task = Some(tokio::spawn(async move {
+                loop {
                     // Get the client ID
-                    let client_id_str = if let Ok(id_guard) = client_id_clone.lock() {
+                    let client_id_str = {
+                        let id_guard = client_id_clone.lock().await;
                         id_guard.clone()
-                    } else {
-                        None
                     };
 
                     // Send a GET request to poll for messages
                     let poll_uri = if let Some(id) = &client_id_str {
-                        format!("{}/poll?client_id={}", uri, id)
+                        format!("{}/poll?client_id={}", uri_clone, id)
                     } else {
-                        format!("{}/poll", uri)
+                        format!("{}/poll", uri_clone)
                     };
                     debug!("Client polling for messages at {}", poll_uri);
 
-                    match client.get(&poll_uri).send() {
+                    match client_clone.get(&poll_uri).send().await {
                         Ok(response) => {
                             if response.status().is_success() {
-                                match response.text() {
+                                match response.text().await {
                                     Ok(text) => {
                                         if !text.is_empty() && text != "no_messages" {
                                             debug!("Client received message from poll: {}", text);
@@ -416,10 +291,12 @@ impl Transport for SSETransport {
                                             match serde_json::from_str::<serde_json::Value>(&text) {
                                                 Ok(_) => {
                                                     // Add the message to the queue
-                                                    if let Ok(mut queue) = message_queue.lock() {
-                                                        queue.push_back(text);
-                                                        debug!("Client added message to queue for processing");
-                                                    }
+                                                    let mut queue =
+                                                        message_queue_clone.lock().await;
+                                                    queue.push_back(text.clone());
+                                                    debug!("Client added message to queue for processing");
+
+                                                    // The main thread will handle callbacks when messages are processed
                                                 }
                                                 Err(e) => {
                                                     error!("Client received invalid JSON from server: {} - {}", e, text);
@@ -440,17 +317,24 @@ impl Transport for SSETransport {
                         Err(e) => {
                             error!("Client failed to poll for messages: {}", e);
                             // Add a small delay before retrying to avoid hammering the server
-                            thread::sleep(Duration::from_millis(1000));
+                            sleep(Duration::from_millis(1000)).await;
                         }
                     }
 
-                    // Wait before polling again
-                    thread::sleep(Duration::from_millis(500));
-                }
-                debug!("Client polling thread exited");
-            });
+                    // Check if we should stop polling
+                    if tokio::time::timeout(Duration::from_millis(0), stop_signal_clone.notified())
+                        .await
+                        .is_ok()
+                    {
+                        debug!("Client polling task received stop signal");
+                        break;
+                    }
 
-            self.receiver_thread = Some(receiver_thread);
+                    // Wait before polling again
+                    sleep(Duration::from_millis(500)).await;
+                }
+                debug!("Client polling task exited");
+            }));
         }
 
         self.is_connected = true;
@@ -458,7 +342,7 @@ impl Transport for SSETransport {
         Ok(())
     }
 
-    fn send<T: Serialize>(&mut self, message: &T) -> Result<(), MCPError> {
+    async fn send<T: Serialize + Send + Sync>(&mut self, message: &T) -> Result<(), MCPError> {
         if !self.is_connected {
             return Err(MCPError::Transport(
                 "SSE transport not connected".to_string(),
@@ -508,12 +392,13 @@ impl Transport for SSETransport {
             // Client mode - send a POST request to the server
             debug!("Client sending message to server: {}", serialized_message);
 
-            let client = Client::new();
-            match client
+            match self
+                .client
                 .post(&self.uri)
                 .body(serialized_message.clone())
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .send()
+                .await
             {
                 Ok(response) => {
                     if response.status().is_success() {
@@ -537,7 +422,7 @@ impl Transport for SSETransport {
         }
     }
 
-    fn receive<T: DeserializeOwned>(&mut self) -> Result<T, MCPError> {
+    async fn receive<T: DeserializeOwned + Send + Sync>(&mut self) -> Result<T, MCPError> {
         if !self.is_connected {
             return Err(MCPError::Transport(
                 "SSE transport not connected".to_string(),
@@ -545,33 +430,32 @@ impl Transport for SSETransport {
         }
 
         // Use a timeout of 10 seconds
-        let timeout = 10000;
-        let start_time = Instant::now();
+        let timeout = Duration::from_secs(10);
+        let start = Instant::now();
 
         // Try to get a message from the queue with timeout
         let message = loop {
-            if let Ok(mut queue) = self.message_queue.lock() {
-                if let Some(message) = queue.pop_front() {
-                    debug!("Received message: {}", message);
-                    break message;
-                }
-            } else {
-                error!("Failed to lock message queue");
-                return Err(MCPError::Transport(
-                    "Failed to lock message queue".to_string(),
-                ));
+            // Try to get a message from the queue
+            let queue_msg = {
+                let mut queue = self.message_queue.lock().await;
+                queue.pop_front()
+            };
+
+            if let Some(message) = queue_msg {
+                debug!("Received message: {}", message);
+                break message;
             }
 
             // Check if we've exceeded the timeout
-            if start_time.elapsed().as_millis() > timeout as u128 {
-                debug!("Receive timeout after {} ms", timeout);
+            if start.elapsed() >= timeout {
+                debug!("Receive timeout after {:?}", timeout);
                 return Err(MCPError::Transport(
                     "Timeout waiting for message".to_string(),
                 ));
             }
 
             // Sleep for a short time before checking again
-            thread::sleep(Duration::from_millis(100));
+            sleep(Duration::from_millis(100)).await;
         };
 
         // Parse the message
@@ -591,7 +475,7 @@ impl Transport for SSETransport {
         }
     }
 
-    fn close(&mut self) -> Result<(), MCPError> {
+    async fn close(&mut self) -> Result<(), MCPError> {
         if !self.is_connected {
             debug!("SSE transport already closed");
             return Ok(());
@@ -602,18 +486,21 @@ impl Transport for SSETransport {
         // Set the connection flag
         self.is_connected = false;
 
+        // Signal the polling task to stop
+        self.stop_signal.notify_waiters();
+
         // If we're a server, wait a short time to allow clients to receive final responses
         if self.is_server {
             debug!("Server waiting for clients to receive final responses");
             // Wait a short time to allow clients to receive final responses
-            thread::sleep(Duration::from_millis(1000));
+            sleep(Duration::from_millis(1000)).await;
         }
 
-        // Signal the polling thread to stop if it exists
-        if let Some(_thread) = self.receiver_thread.take() {
-            // We can't join the thread here because it might be blocked on I/O
-            // Just let it detect the is_connected flag and exit naturally
-            debug!("Signaled receiver thread to stop");
+        // Join the polling task if it exists
+        if let Some(task) = self.polling_task.take() {
+            match task.abort() {
+                _ => debug!("Aborted polling task"),
+            }
         }
 
         // Call the close callback if set
@@ -641,5 +528,167 @@ impl Transport for SSETransport {
     {
         debug!("Setting on_message callback for SSE transport");
         self.on_message = callback.map(|f| Box::new(f) as Box<dyn Fn(&str) + Send + Sync>);
+    }
+}
+
+// Helper function to process HTTP requests
+async fn process_request(
+    mut request: Request,
+    method: &Method,
+    url: &str,
+    sender: &mpsc::Sender<String>,
+    active_clients: &Arc<Mutex<HashMap<String, ClientConnection>>>,
+    client_messages: &Arc<Mutex<HashMap<String, VecDeque<String>>>>,
+) {
+    match (method, url) {
+        (Method::Post, "/") => {
+            // Handle POST request (client sending a message to server)
+            let mut content = String::new();
+            if let Err(e) = request.as_reader().read_to_string(&mut content) {
+                error!("Error reading request body: {}", e);
+                let _ = request.respond(
+                    HttpResponse::from_string("Error reading request").with_status_code(400),
+                );
+                return;
+            }
+
+            debug!("Server received POST request body: {}", content);
+
+            // Send the message to be processed
+            if let Err(e) = sender.send(content).await {
+                error!("Failed to send message to processing task: {}", e);
+            }
+
+            // Send a success response
+            let _ = request.respond(HttpResponse::from_string("OK").with_status_code(200));
+        }
+        (Method::Get, path) if path.starts_with("/poll") => {
+            // Handle polling request from client
+            debug!("Server received polling request: {}", path);
+
+            // Extract client ID from query parameters
+            let client_id = path.split('?').nth(1).and_then(|query| {
+                query.split('&').find_map(|pair| {
+                    let mut parts = pair.split('=');
+                    if let Some(key) = parts.next() {
+                        if key == "client_id" {
+                            parts.next().map(|value| value.to_string())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            if let Some(client_id) = client_id {
+                // Check if there are any messages in the client-specific queue
+                let message = if let Ok(mut client_msgs) = client_messages.lock() {
+                    client_msgs
+                        .entry(client_id.clone())
+                        .or_insert_with(VecDeque::new)
+                        .pop_front()
+                } else {
+                    None
+                };
+
+                // Send the message or a no-message response
+                if let Some(msg) = message {
+                    debug!("Server sending message to client {}: {}", client_id, msg);
+                    let response = HttpResponse::from_string(msg)
+                        .with_status_code(200)
+                        .with_header(tiny_http::Header {
+                            field: "Content-Type".parse().unwrap(),
+                            value: "application/json".parse().unwrap(),
+                        });
+
+                    if let Err(e) = request.respond(response) {
+                        error!("Failed to send response to client: {}", e);
+                    } else {
+                        debug!("Server successfully sent response to client");
+                    }
+                } else {
+                    // No messages available
+                    debug!(
+                        "Server sending no_messages response to client {}",
+                        client_id
+                    );
+                    let response = HttpResponse::from_string("no_messages").with_status_code(200);
+
+                    if let Err(e) = request.respond(response) {
+                        error!("Failed to send no_messages response: {}", e);
+                    }
+                }
+
+                // Update the client's last poll time
+                if let Ok(mut clients) = active_clients.lock() {
+                    if let Some(client) = clients.get_mut(&client_id) {
+                        client.last_poll = Instant::now();
+                    }
+                }
+            } else {
+                // No client ID provided
+                debug!("Client poll request missing client_id parameter");
+                let response =
+                    HttpResponse::from_string("Missing client_id parameter").with_status_code(400);
+                let _ = request.respond(response);
+            }
+        }
+        (Method::Get, "/register") => {
+            // Handle client registration
+            debug!("Server received client registration request");
+
+            // Track the client connection
+            let client_id = format!(
+                "client-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+            );
+
+            if let Ok(mut clients) = active_clients.lock() {
+                clients.insert(
+                    client_id.clone(),
+                    ClientConnection {
+                        id: client_id.clone(),
+                        last_poll: Instant::now(),
+                    },
+                );
+                debug!("Client registered: {}", client_id);
+                debug!("Total connected clients: {}", clients.len());
+            }
+
+            // Initialize the client's message queue
+            if let Ok(mut client_msgs) = client_messages.lock() {
+                client_msgs
+                    .entry(client_id.clone())
+                    .or_insert_with(VecDeque::new);
+                debug!("Initialized message queue for client {}", client_id);
+            }
+
+            // Send a success response
+            let response =
+                HttpResponse::from_string(format!("{{\"client_id\":\"{}\"}}", client_id))
+                    .with_status_code(200)
+                    .with_header(tiny_http::Header {
+                        field: "Content-Type".parse().unwrap(),
+                        value: "application/json".parse().unwrap(),
+                    });
+
+            if let Err(e) = request.respond(response) {
+                error!("Failed to send registration response: {}", e);
+            } else {
+                debug!("Server successfully registered client");
+            }
+        }
+        _ => {
+            // Unsupported method or path
+            error!("Unsupported request: {} {}", method, url);
+            let _ = request.respond(
+                HttpResponse::from_string("Method or path not allowed").with_status_code(405),
+            );
+        }
     }
 }

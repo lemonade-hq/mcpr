@@ -35,20 +35,22 @@ serde_json = "1.0"
 thiserror = "1.0"
 anyhow = "1.0"
 log = "0.4"
+env_logger = "0.10"
 clap = { version = "4.4", features = ["derive"] }
-tokio = { version = "1.35", features = ["full"], optional = true }
-url = "2.2.2"                                                      # Using 2.2.2 for compatibility with examples
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+url = "2.2.2" # Using 2.2.2 for compatibility with examples
 tiny_http = "0.12"
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.12", features = [
+    "json",
+    "default-tls",
+    "blocking",
+] } # Temporarily keeping blocking for transitional period
 rand = "0.8"
 tungstenite = { version = "0.20", features = ["native-tls"] }
+tokio-tungstenite = "0.20" # Added for WebSocket async support
 
 # Optional dependencies that are only used by specific features
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full", "test-util"] }
-
-[features]
-default = []
-async = ["tokio"]
-
-# Examples are now in their own separate crates with their own Cargo.toml files
