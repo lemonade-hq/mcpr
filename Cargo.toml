@@ -46,10 +46,14 @@ reqwest = { version = "0.12", features = [
     "json",
     "default-tls",
     "blocking",
+    "stream",
 ] } # Temporarily keeping blocking for transitional period
 rand = "0.8"
 tungstenite = { version = "0.20", features = ["native-tls"] }
 tokio-tungstenite = "0.20" # Added for WebSocket async support
+chrono = "0.4" # For timestamp handling in examples
+tokio-util = { version = "0.7", features = ["io"] } # For SSE E2E tests
+uuid = { version = "1.16.0", features = ["v4"] }
 
 # Optional dependencies that are only used by specific features
 [dev-dependencies]

@@ -241,6 +241,32 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
         self.process_messages().await
     }
 
+    /// Start the server with the given transport in the background
+    /// Returns immediately without blocking the caller
+    pub async fn start_background(&mut self, mut transport: T) -> Result<(), MCPError> {
+        // Start the transport
+        transport.start().await?;
+
+        // Clone the server for the background task
+        let mut server_clone = self.clone();
+
+        // Store the transport in both instances
+        self.transport = Some(transport.clone());
+        server_clone.transport = Some(transport);
+
+        // Spawn a background task to run the message processing loop
+        tokio::spawn(async move {
+            if let Err(e) = server_clone.process_messages().await {
+                error!("Error in server background task: {}", e);
+            }
+        });
+
+        // Return immediately
+        info!("Server started in background mode");
+
+        Ok(())
+    }
+
     /// Process incoming messages
     async fn process_messages(&mut self) -> Result<(), MCPError> {
         loop {
@@ -305,6 +331,41 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
                                 error!("Error handling tools/list request: {}", e);
                             }
                         }
+                        "tools/call" => {
+                            info!("Received tools/call request");
+                            // Process tools/call requests in a new task
+                            let tools_call_task = self.clone_for_tools_call();
+                            let id_clone = id.clone();
+                            let params_clone = params.clone();
+
+                            // Spawn a new task to handle the tool call concurrently
+                            tokio::spawn(async move {
+                                if let Err(e) = tools_call_task
+                                    .handle_tools_call(id_clone, params_clone)
+                                    .await
+                                {
+                                    error!("Error handling tools/call request: {}", e);
+                                }
+                            });
+                        }
+                        "tool_call" => {
+                            // Legacy method for backward compatibility
+                            info!("Received legacy tool_call request (redirecting to tools/call)");
+                            // Process tools/call requests in a new task
+                            let tools_call_task = self.clone_for_tools_call();
+                            let id_clone = id.clone();
+                            let params_clone = params.clone();
+
+                            // Spawn a new task to handle the tool call concurrently
+                            tokio::spawn(async move {
+                                if let Err(e) = tools_call_task
+                                    .handle_tools_call(id_clone, params_clone)
+                                    .await
+                                {
+                                    error!("Error handling tool_call request: {}", e);
+                                }
+                            });
+                        }
                         "prompts/list" => {
                             info!("Received prompts list request");
                             if let Err(e) = self.handle_prompts_list(id, params).await {
@@ -328,23 +389,6 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
                             if let Err(e) = self.handle_cancel_request(id, params).await {
                                 error!("Error handling cancel request: {}", e);
                             }
-                        }
-                        "tools/call" => {
-                            info!("Received tools/call request");
-                            // Process tools/call requests in a new task
-                            let tools_call_task = self.clone_for_tools_call();
-                            let id_clone = id.clone();
-                            let params_clone = params.clone();
-
-                            // Spawn a new task to handle the tool call concurrently
-                            tokio::spawn(async move {
-                                if let Err(e) = tools_call_task
-                                    .handle_tools_call(id_clone, params_clone)
-                                    .await
-                                {
-                                    error!("Error handling tools/call request: {}", e);
-                                }
-                            });
                         }
                         "shutdown" => {
                             info!("Received shutdown request");
@@ -468,7 +512,8 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
         // Create response with proper result
         let response = JSONRPCResponse::new(
             id,
-            serde_json::to_value(init_result).map_err(MCPError::Serialization)?,
+            serde_json::to_value(init_result)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?,
         );
 
         // Send the response
@@ -497,7 +542,7 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
         // Create response with proper result
         let response = JSONRPCResponse::new(
             id,
-            serde_json::to_value(tools_list).map_err(MCPError::Serialization)?,
+            serde_json::to_value(tools_list).map_err(|e| MCPError::Serialization(e.to_string()))?,
         );
 
         // Send the response
@@ -526,7 +571,8 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
         // Create response with proper result
         let response = JSONRPCResponse::new(
             id,
-            serde_json::to_value(prompts_list).map_err(MCPError::Serialization)?,
+            serde_json::to_value(prompts_list)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?,
         );
 
         // Send the response
@@ -555,7 +601,8 @@ impl<T: Transport + Send + Sync + Clone + 'static> Server<T> {
         // Create response with proper result
         let response = JSONRPCResponse::new(
             id,
-            serde_json::to_value(resources_list).map_err(MCPError::Serialization)?,
+            serde_json::to_value(resources_list)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?,
         );
 
         // Send the response
@@ -732,18 +779,55 @@ where
             MCPError::Protocol("Missing parameters in tools/call request".to_string())
         })?;
 
-        // Parse the parameters as CallToolParams
-        let call_params: CallToolParams = serde_json::from_value(params.clone())
-            .map_err(|e| MCPError::Protocol(format!("Invalid tools/call parameters: {}", e)))?;
+        // Get the tool name - support both standard MCP ('name' with 'arguments') and our custom format
+        let (tool_name, tool_params) = if let Some(name) = params.get("name") {
+            let name_str = name
+                .as_str()
+                .ok_or_else(|| MCPError::Protocol("Tool name must be a string".to_string()))?;
 
-        // Get the tool name and arguments
-        let tool_name = call_params.name.clone();
+            // Check for 'arguments' (MCP standard) or fall back to 'parameters' (our custom format)
+            let params_value = if params.get("arguments").is_some() {
+                // MCP standard format: use 'arguments'
+                match params.get("arguments") {
+                    Some(args) => args.clone(),
+                    None => Value::Null,
+                }
+            } else if params.get("parameters").is_some() {
+                // Our custom format: use 'parameters'
+                match params.get("parameters") {
+                    Some(args) => args.clone(),
+                    None => Value::Null,
+                }
+            } else {
+                // No parameters found
+                Value::Null
+            };
 
-        // Convert arguments to JSON Value if they exist, otherwise use null
-        let tool_params = match call_params.arguments {
-            Some(args) => serde_json::to_value(args).unwrap_or(Value::Null),
-            None => Value::Null,
+            (name_str.to_string(), params_value)
+        } else {
+            // Backward compatibility - try to parse as CallToolParams for direct compatibility
+            match serde_json::from_value::<CallToolParams>(params.clone()) {
+                Ok(call_params) => {
+                    let tool_name = call_params.name.clone();
+                    let tool_params = match call_params.arguments {
+                        Some(args) => serde_json::to_value(args).unwrap_or(Value::Null),
+                        None => Value::Null,
+                    };
+                    (tool_name, tool_params)
+                }
+                Err(e) => {
+                    return Err(MCPError::Protocol(format!(
+                        "Invalid tool call parameters: {}",
+                        e
+                    )));
+                }
+            }
         };
+
+        debug!(
+            "Executing tool {} with params: {:?}",
+            tool_name, tool_params
+        );
 
         // Run the tool handler
         let result = self.execute_tool(&tool_name, tool_params).await;
@@ -767,7 +851,8 @@ where
                 // Create response
                 let response = JSONRPCResponse::new(
                     id,
-                    serde_json::to_value(tool_result).map_err(MCPError::Serialization)?,
+                    serde_json::to_value(tool_result)
+                        .map_err(|e| MCPError::Serialization(e.to_string()))?,
                 );
 
                 // Send the response
@@ -885,8 +970,8 @@ mod tests {
         }
 
         async fn send<T: Serialize + Send + Sync>(&mut self, message: &T) -> Result<(), MCPError> {
-            let serialized =
-                serde_json::to_string(message).map_err(|e| MCPError::Serialization(e))?;
+            let serialized = serde_json::to_string(message)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?;
 
             let mut queue = self.send_queue.lock().await;
             queue.push_back(serialized);
@@ -897,7 +982,7 @@ mod tests {
             let mut queue = self.receive_queue.lock().await;
 
             if let Some(message) = queue.pop_front() {
-                serde_json::from_str(&message).map_err(|e| MCPError::Serialization(e))
+                serde_json::from_str(&message).map_err(|e| MCPError::Serialization(e.to_string()))
             } else {
                 // In a real implementation, this would block until a message is received
                 // For testing, we'll just simulate a timeout/error
@@ -1044,8 +1129,8 @@ mod tests {
                 .ok_or_else(|| MCPError::Protocol("No response received".to_string()))?;
 
             // Parse response and verify it contains expected data
-            let parsed: JSONRPCMessage =
-                serde_json::from_str(&response).map_err(|e| MCPError::Serialization(e))?;
+            let parsed: JSONRPCMessage = serde_json::from_str(&response)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?;
 
             match parsed {
                 JSONRPCMessage::Response(resp) => {
@@ -1148,8 +1233,8 @@ mod tests {
                 .ok_or_else(|| MCPError::Protocol("No response received".to_string()))?;
 
             // Parse response and verify it contains expected data
-            let parsed: JSONRPCMessage =
-                serde_json::from_str(&response).map_err(|e| MCPError::Serialization(e))?;
+            let parsed: JSONRPCMessage = serde_json::from_str(&response)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?;
 
             match parsed {
                 JSONRPCMessage::Response(resp) => {
@@ -1225,8 +1310,8 @@ mod tests {
                 .ok_or_else(|| MCPError::Protocol("No response received".to_string()))?;
 
             // Parse response and verify it contains expected data
-            let parsed: JSONRPCMessage =
-                serde_json::from_str(&response).map_err(|e| MCPError::Serialization(e))?;
+            let parsed: JSONRPCMessage = serde_json::from_str(&response)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?;
 
             match parsed {
                 JSONRPCMessage::Response(resp) => {
@@ -1347,8 +1432,8 @@ mod tests {
                 .ok_or_else(|| MCPError::Protocol("No response received".to_string()))?;
 
             // Parse response and verify it contains expected data
-            let parsed: JSONRPCMessage =
-                serde_json::from_str(&response).map_err(|e| MCPError::Serialization(e))?;
+            let parsed: JSONRPCMessage = serde_json::from_str(&response)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?;
 
             match parsed {
                 JSONRPCMessage::Response(resp) => {
@@ -1413,8 +1498,8 @@ mod tests {
                 .ok_or_else(|| MCPError::Protocol("No response received".to_string()))?;
 
             // Parse response and verify it contains expected data
-            let parsed: JSONRPCMessage =
-                serde_json::from_str(&response).map_err(|e| MCPError::Serialization(e))?;
+            let parsed: JSONRPCMessage = serde_json::from_str(&response)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?;
 
             match parsed {
                 JSONRPCMessage::Response(resp) => {

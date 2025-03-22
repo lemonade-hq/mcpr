@@ -56,5 +56,10 @@ pub mod stdio;
 /// Server-Sent Events (SSE) transport
 pub mod sse;
 
-/// WebSocket transport
-pub mod websocket;
+// Tests for SSE transport
+#[cfg(test)]
+mod sse_tests;
+
+// Temporarily comment out this module due to dependency errors
+// #[cfg(test)]
+// mod sse_tests;

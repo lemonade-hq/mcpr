@@ -6,9 +6,9 @@ use log::{error, info, warn};
 use mcpr::{
     client::Client,
     error::MCPError,
-    transport::{
-        sse::SSETransport, stdio::StdioTransport, websocket::WebSocketTransport, Transport,
-    },
+    schema::common::Tool,
+    server::{Server, ServerConfig},
+    transport::{sse::SSETransport, stdio::StdioTransport, Transport},
 };
 use std::path::PathBuf;
 
@@ -228,10 +228,58 @@ async fn run_server(port: u16, transport_type: &str, debug: bool) -> Result<(), 
         }
         "sse" => {
             info!("Starting server with SSE transport on port {}", port);
-            // TODO: Implement SSE server
-            Err(MCPError::UnsupportedFeature(
-                "SSE server not yet implemented".to_string(),
-            ))
+
+            // Create a URI for the SSE server
+            let uri = format!("http://0.0.0.0:{}", port);
+
+            // Create the SSE transport
+            let transport = SSETransport::new_server(&uri)?;
+
+            // Configure a basic echo tool
+            let echo_tool = Tool {
+                name: "echo".to_string(),
+                description: Some("Echo tool".to_string()),
+                input_schema: mcpr::schema::common::ToolInputSchema {
+                    r#type: "object".to_string(),
+                    properties: Some(
+                        [(
+                            "message".to_string(),
+                            serde_json::json!({
+                                "type": "string",
+                                "description": "Message to echo"
+                            }),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    required: Some(vec!["message".to_string()]),
+                },
+            };
+
+            // Create server config
+            let server_config = ServerConfig::new()
+                .with_name("MCP SSE Server")
+                .with_version("1.0.0")
+                .with_tool(echo_tool);
+
+            // Create and start the server
+            let mut server = Server::new(server_config);
+
+            // Register the echo tool handler
+            server.register_tool_handler("echo", |params| async move {
+                let message = params
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| MCPError::Protocol("Missing message parameter".to_string()))?;
+
+                info!("Echo request: {}", message);
+
+                Ok(serde_json::json!({"result": message}))
+            })?;
+
+            // Start the server
+            info!("Starting SSE server on {}", uri);
+            server.serve(transport).await
         }
         "websocket" => {
             info!("Starting server with WebSocket transport on port {}", port);
@@ -254,21 +302,13 @@ async fn run_server(port: u16, transport_type: &str, debug: bool) -> Result<(), 
 async fn run_client(cmd: Connect) -> Result<(), MCPError> {
     info!("Connecting to {}", cmd.uri);
 
-    let uri = cmd.uri.clone();
-
     // Handle different transport types directly
     match cmd.transport.as_str() {
         "sse" => {
-            info!("Using SSE transport");
-            let transport = SSETransport::new(&uri);
-            let mut client = Client::new(transport);
-            handle_client_session(&mut client, cmd).await
-        }
-        "websocket" => {
-            info!("Using WebSocket transport");
-            let transport = WebSocketTransport::new(&uri);
-            let mut client = Client::new(transport);
-            handle_client_session(&mut client, cmd).await
+            info!("SSE transport is only supported for servers");
+            Err(MCPError::Transport(
+                "SSE transport is only supported for servers".to_string(),
+            ))
         }
         "stdio" => {
             info!("Using stdio transport");

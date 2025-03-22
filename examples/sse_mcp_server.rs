@@ -1,9 +1,8 @@
-use log::info;
 use mcpr::{
     error::MCPError,
     schema::common::{Tool, ToolInputSchema},
     server::{Server, ServerConfig},
-    transport::websocket::WebSocketTransport,
+    transport::sse::SSETransport,
 };
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
@@ -11,13 +10,14 @@ use tokio::sync::Notify;
 
 #[tokio::main]
 async fn main() -> Result<(), MCPError> {
-    // Initialize logging
+    // Initialize logging (optional)
     env_logger::init_from_env(
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
 
-    // Create a transport for WebSocket server (listens on localhost:8080)
-    let transport = WebSocketTransport::new_server("127.0.0.1:8080");
+    // Create a transport for SSE server (listens on all interfaces)
+    let uri = "http://127.0.0.1:8000";
+    let transport = SSETransport::new_server(uri)?;
 
     // Create an echo tool
     let echo_tool = Tool {
@@ -42,7 +42,7 @@ async fn main() -> Result<(), MCPError> {
 
     // Configure the server
     let server_config = ServerConfig::new()
-        .with_name("WebSocket Echo Server")
+        .with_name("SSE MCP Server")
         .with_version("1.0.0")
         .with_tool(echo_tool);
 
@@ -57,7 +57,7 @@ async fn main() -> Result<(), MCPError> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| MCPError::Protocol("Missing message parameter".to_string()))?;
 
-        info!("Echo request: {}", message);
+        println!("Echo request: {}", message);
 
         // Return the message as the result
         Ok(json!({
@@ -72,22 +72,25 @@ async fn main() -> Result<(), MCPError> {
     // Handle Ctrl+C
     tokio::spawn(async move {
         if let Ok(()) = tokio::signal::ctrl_c().await {
-            info!("Received Ctrl+C, shutting down...");
+            println!("Received Ctrl+C, shutting down...");
             shutdown_clone.notify_one();
         }
     });
 
-    // Start the server in background mode
-    info!("Starting WebSocket server on ws://127.0.0.1:8080");
+    // Start the server in the background with SSE transport
     server.start_background(transport).await?;
 
-    // Since the server runs in the background, we can continue with other operations
-    info!("WebSocket server running on ws://127.0.0.1:8080");
-    info!("Press Ctrl+C to exit");
+    println!("Server started on {}. Press Ctrl+C to stop.", uri);
+    println!("Endpoints:");
+    println!("  - GET  {}/events    (SSE events stream)", uri);
+    println!("  - POST {}/messages  (Message endpoint)", uri);
+    println!("\nTest with curl:");
+    println!("  curl -N -H \"Accept: text/event-stream\" {}/events", uri);
+    println!("  curl -X POST -H \"Content-Type: application/json\" -d '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}}' {}/messages", uri);
 
     // Wait for shutdown signal
     shutdown.notified().await;
 
-    info!("Server shut down gracefully");
+    println!("Server shut down gracefully");
     Ok(())
 }

@@ -148,7 +148,8 @@ impl<T: Transport + Send + Sync> Client<T> {
                 })?;
 
                 // Parse the result
-                serde_json::from_value(result.clone()).map_err(MCPError::Serialization)
+                serde_json::from_value(result.clone())
+                    .map_err(|e| MCPError::Serialization(e.to_string()))
             }
             JSONRPCMessage::Error(err) => {
                 Err(MCPError::Protocol(format!("Tool call failed: {:?}", err)))
