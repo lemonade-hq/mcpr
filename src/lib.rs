@@ -52,7 +52,7 @@
 //!     error::MCPError,
 //!     server::{Server, ServerConfig},
 //!     transport::stdio::StdioTransport,
-//!     Tool,
+//!     schema::common::Tool,
 //! };
 //! use serde_json::Value;
 //!

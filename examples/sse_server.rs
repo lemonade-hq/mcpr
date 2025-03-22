@@ -241,7 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Accept connections
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (mut stream, _) = listener.accept().await?;
         let tx_clone = tx.clone();
         let store_clone = message_store.clone();
 

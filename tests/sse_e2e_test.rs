@@ -1,7 +1,6 @@
 use futures::{Stream, StreamExt};
-use hyper::{Body, Response, StatusCode};
 use mcpr::{
-    client::{Client, ClientConfig},
+    client::Client as MCPClient,
     error::MCPError,
     schema::{
         client::CallToolParams,
@@ -14,7 +13,7 @@ use mcpr::{
         Transport,
     },
 };
-use reqwest::{header, Client};
+use reqwest::{self, header};
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
@@ -103,7 +102,7 @@ async fn collect_sse_messages(
     uri: &str,
     limit: usize,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let client = Client::new();
+    let client = reqwest::Client::new();
     let sse_url = format!("{}/events", uri);
 
     // Connect to the SSE endpoint
@@ -154,7 +153,7 @@ async fn collect_sse_messages(
 
 /// Send a message to the server
 async fn send_message(uri: &str, message: &Value) -> Result<Value, Box<dyn std::error::Error>> {
-    let client = Client::new();
+    let client = reqwest::Client::new();
     let send_url = format!("{}/messages", uri);
 
     // POST the message

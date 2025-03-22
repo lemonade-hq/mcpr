@@ -1,5 +1,5 @@
 use mcpr::error::MCPError;
-use mcpr::transport::sse::SSETransport;
+use mcpr::transport::sse::SSEServerTransport;
 use mcpr::transport::Transport;
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -20,15 +20,15 @@ struct Message {
 #[tokio::main]
 async fn main() -> Result<(), MCPError> {
     // Create a SSE transport in server mode
-    let uri = "http://127.0.0.1:8000";
+    let uri = "http://127.0.0.1:8888";
     println!("Starting SSE server at {}", uri);
 
     // Create the transport in server mode
-    let mut transport = SSETransport::new_server(uri)?;
+    let mut transport = SSEServerTransport::new(uri)?;
 
     // Start the server
     println!("Starting SSE server...");
-    transport.start_background().await?;
+    transport.start().await?;
     println!("SSE server started successfully!");
     println!("Endpoints:");
     println!("  - GET  {}/events    (SSE events stream)", uri);

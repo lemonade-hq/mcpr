@@ -2,7 +2,7 @@ use mcpr::{
     error::MCPError,
     schema::common::{Tool, ToolInputSchema},
     server::{Server, ServerConfig},
-    transport::sse::SSETransport,
+    transport::sse::SSEServerTransport,
 };
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
@@ -16,8 +16,8 @@ async fn main() -> Result<(), MCPError> {
     );
 
     // Create a transport for SSE server (listens on all interfaces)
-    let uri = "http://127.0.0.1:8000";
-    let transport = SSETransport::new_server(uri)?;
+    let uri = "http://127.0.0.1:8889";
+    let transport = SSEServerTransport::new(uri)?;
 
     // Create an echo tool
     let echo_tool = Tool {

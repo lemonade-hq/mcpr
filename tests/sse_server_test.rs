@@ -6,12 +6,9 @@ use mcpr::{
         json_rpc::{JSONRPCMessage, JSONRPCRequest, RequestId},
     },
     server::{Server, ServerConfig},
-    transport::{
-        sse::{SSEClientTransport, SSEServerTransport},
-        Transport,
-    },
+    transport::sse::SSEServerTransport,
 };
-use reqwest::{header, Client};
+use reqwest::{header, Client as ReqwestClient};
 use serde_json::{json, Value};
 use std::{collections::HashMap, pin::Pin, time::Duration};
 use tokio::{
@@ -102,14 +99,14 @@ type PinnedStream = Pin<Box<dyn Stream<Item = String> + Send>>;
 /// Simple HTTP client for testing the server
 struct TestClient {
     base_url: String,
-    client: Client,
+    client: ReqwestClient,
 }
 
 impl TestClient {
     fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.to_string(),
-            client: Client::new(),
+            client: ReqwestClient::new(),
         }
     }
 
