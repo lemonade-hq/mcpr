@@ -398,8 +398,8 @@ mod tests {
                 ));
             }
 
-            let serialized =
-                serde_json::to_string(message).map_err(|e| MCPError::Serialization(e))?;
+            let serialized = serde_json::to_string(message)
+                .map_err(|e| MCPError::Serialization(e.to_string()))?;
 
             let mut queue = self.send_queue.lock().await;
             queue.push_back(serialized);
@@ -428,7 +428,8 @@ mod tests {
                     callback(&message);
                 }
 
-                return serde_json::from_str(&message).map_err(|e| MCPError::Serialization(e));
+                return serde_json::from_str(&message)
+                    .map_err(|e| MCPError::Serialization(e.to_string()));
             }
 
             Err(MCPError::Transport("No more messages".to_string()))

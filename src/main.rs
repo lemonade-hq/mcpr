@@ -8,7 +8,11 @@ use mcpr::{
     error::MCPError,
     schema::common::Tool,
     server::{Server, ServerConfig},
-    transport::{sse::SSETransport, stdio::StdioTransport, Transport},
+    transport::{
+        sse::{SSEClientTransport, SSEServerTransport},
+        stdio::StdioTransport,
+        Transport,
+    },
 };
 use std::path::PathBuf;
 
@@ -233,7 +237,7 @@ async fn run_server(port: u16, transport_type: &str, debug: bool) -> Result<(), 
             let uri = format!("http://0.0.0.0:{}", port);
 
             // Create the SSE transport
-            let transport = SSETransport::new_server(&uri)?;
+            let transport = SSEServerTransport::new(&uri)?;
 
             // Configure a basic echo tool
             let echo_tool = Tool {

@@ -6,7 +6,10 @@ use mcpr::{
         json_rpc::{JSONRPCMessage, JSONRPCRequest, RequestId},
     },
     server::{Server, ServerConfig},
-    transport::sse::SSETransport,
+    transport::{
+        sse::{SSEClientTransport, SSEServerTransport},
+        Transport,
+    },
 };
 use reqwest::{header, Client};
 use serde_json::{json, Value};
@@ -24,7 +27,7 @@ async fn start_test_server() -> Result<(String, mpsc::Sender<()>), MCPError> {
     let uri = format!("http://127.0.0.1:{}", port);
 
     // Create the SSE transport for the server
-    let transport = SSETransport::new_server(&uri)?;
+    let transport = SSEServerTransport::new(&uri)?;
 
     // Create an echo tool
     let echo_tool = Tool {

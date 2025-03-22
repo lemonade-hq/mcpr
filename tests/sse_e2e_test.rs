@@ -1,5 +1,7 @@
 use futures::{Stream, StreamExt};
+use hyper::{Body, Response, StatusCode};
 use mcpr::{
+    client::{Client, ClientConfig},
     error::MCPError,
     schema::{
         client::CallToolParams,
@@ -7,7 +9,10 @@ use mcpr::{
         json_rpc::{JSONRPCMessage, JSONRPCRequest, RequestId},
     },
     server::{Server, ServerConfig},
-    transport::sse::SSETransport,
+    transport::{
+        sse::{SSEClientTransport, SSEServerTransport},
+        Transport,
+    },
 };
 use reqwest::{header, Client};
 use serde_json::{json, Value};
@@ -24,7 +29,7 @@ async fn run_test_server() -> Result<(String, mpsc::Sender<()>), MCPError> {
     // Use a random port to avoid conflicts
     let port = 18000 + rand::random::<u16>() % 1000;
     let uri = format!("http://127.0.0.1:{}", port);
-    let transport = SSETransport::new_server(&uri)?;
+    let transport = SSEServerTransport::new(&uri)?;
 
     // Configure a simple echo tool
     let echo_tool = Tool {
