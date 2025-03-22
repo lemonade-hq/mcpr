@@ -51,7 +51,6 @@ use crate::{
     schema::json_rpc::{JSONRPCMessage, JSONRPCRequest, RequestId},
     transport::Transport,
 };
-use async_trait::async_trait;
 use futures::future::join_all;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
