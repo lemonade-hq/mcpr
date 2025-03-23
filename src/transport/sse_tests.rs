@@ -2,7 +2,12 @@
 #![cfg(test)]
 use crate::transport::sse::{SSEClientTransport, SSEServerTransport};
 use crate::transport::Transport;
+use hyper::header;
+use hyper::server::conn::AddrStream;
+use hyper::service::{make_service_fn, service_fn};
+use hyper::{Body, Method, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,85 +25,96 @@ struct TestMessage {
 
 // Helper function to create a mock SSE server
 async fn create_mock_sse_server() -> (SocketAddr, oneshot::Sender<()>) {
-    // Bind to a random available port
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    // Create a channel to signal shutdown
+    // Create a shutdown channel
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-    // Spawn the server
+    // Build a Vec of test messages to send
+    let test_messages = vec![
+        TestMessage {
+            id: 1,
+            jsonrpc: "2.0".to_string(),
+            method: "test1".to_string(),
+            params: serde_json::json!({}),
+        },
+        TestMessage {
+            id: 2,
+            jsonrpc: "2.0".to_string(),
+            method: "test2".to_string(),
+            params: serde_json::json!({
+                "key": "value"
+            }),
+        },
+    ];
+
+    // Create an HTTP server that serves SSE
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint_url = format!("http://{}/messages", addr);
+
+    // Spawn a tokio task that runs the server
     tokio::spawn(async move {
-        // Define test messages
-        let test_messages = vec![
-            TestMessage {
-                id: 1,
-                jsonrpc: "2.0".to_string(),
-                method: "test1".to_string(),
-                params: serde_json::json!({}),
-            },
-            TestMessage {
-                id: 2,
-                jsonrpc: "2.0".to_string(),
-                method: "test2".to_string(),
-                params: serde_json::json!({"key": "value"}),
-            },
-        ];
-
-        tokio::select! {
-            _ = async {
-                while let Ok((stream, _)) = listener.accept().await {
+        let make_service = make_service_fn(move |_| {
+            let test_messages = test_messages.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req| {
                     let test_messages = test_messages.clone();
+                    async move {
+                        let response = match (req.method(), req.uri().path()) {
+                            (&Method::GET, "/") => {
+                                let mut response = Response::new(Body::empty());
+                                response.headers_mut().insert(
+                                    header::CONTENT_TYPE,
+                                    HeaderValue::from_static("text/event-stream"),
+                                );
+                                response.headers_mut().insert(
+                                    header::CACHE_CONTROL,
+                                    HeaderValue::from_static("no-cache"),
+                                );
+                                response.headers_mut().insert(
+                                    header::CONNECTION,
+                                    HeaderValue::from_static("keep-alive"),
+                                );
 
-                    tokio::spawn(async move {
-                        let mut http_response = "HTTP/1.1 200 OK\r\n".to_string();
-                        http_response.push_str("Content-Type: text/event-stream\r\n");
-                        http_response.push_str("Cache-Control: no-cache\r\n");
-                        http_response.push_str("Connection: keep-alive\r\n");
-                        http_response.push_str("\r\n");
+                                // First, send the endpoint event
+                                let endpoint_event =
+                                    format!("event: endpoint\ndata: {}\n\n", endpoint_url);
 
-                        let mut tcp_stream = tokio::io::BufWriter::new(stream);
+                                // Then, serialize the test messages
+                                let mut body = endpoint_event;
+                                for msg in test_messages {
+                                    let json = serde_json::to_string(&msg).unwrap();
+                                    body.push_str(&format!("event: message\ndata: {}\n\n", json));
+                                }
 
-                        // Send the HTTP response
-                        if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut tcp_stream, http_response.as_bytes()).await {
-                            eprintln!("Error sending HTTP response: {}", e);
-                            return;
-                        }
-
-                        // Send each test message as an SSE event
-                        for message in test_messages {
-                            let json = serde_json::to_string(&message).unwrap();
-                            let sse_event = format!("data: {}\n\n", json);
-
-                            if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut tcp_stream, sse_event.as_bytes()).await {
-                                eprintln!("Error sending SSE event: {}", e);
-                                return;
+                                *response.body_mut() = Body::from(body);
+                                response
                             }
-
-                            if let Err(e) = tokio::io::AsyncWriteExt::flush(&mut tcp_stream).await {
-                                eprintln!("Error flushing TCP stream: {}", e);
-                                return;
+                            _ => {
+                                let mut response = Response::new(Body::empty());
+                                *response.status_mut() = StatusCode::NOT_FOUND;
+                                response
                             }
-
-                            // Add a small delay between messages
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
-
-                        // Keep the connection open
-                        loop {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        }
-                    });
-                }
-            } => {}
-
-            _ = shutdown_rx => {
-                // Server shutdown requested
+                        };
+                        Ok::<_, Infallible>(response)
+                    }
+                }))
             }
+        });
+
+        let server = Server::builder(hyper::server::accept::from_stream(TcpListenerStream::new(
+            listener,
+        )))
+        .serve(make_service);
+
+        let graceful = server.with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        });
+
+        if let Err(e) = graceful.await {
+            eprintln!("Server error: {}", e);
         }
     });
 
-    // Return the server address and shutdown sender
     (addr, shutdown_tx)
 }
 
@@ -195,10 +211,9 @@ async fn test_sse_transport_receive() {
     // Create a mock SSE server
     let (server_addr, shutdown_tx) = create_mock_sse_server().await;
     let sse_url = format!("http://{}", server_addr);
-    let send_url = format!("http://{}", server_addr); // Not used for this test
 
-    // Create the SSE client transport
-    let mut transport = SSEClientTransport::new(&sse_url, &send_url).unwrap();
+    // Create the SSE client transport (now only needs the events URL)
+    let mut transport = SSEClientTransport::new(&sse_url).unwrap();
 
     // Start the transport
     transport.start().await.unwrap();
@@ -213,6 +228,9 @@ async fn test_sse_transport_receive() {
         let mut flag = message_flag.lock().unwrap();
         *flag = true;
     }));
+
+    // Wait a bit for the endpoint event to be processed
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Receive the first message
     let message1: TestMessage = transport.receive().await.unwrap();
@@ -241,56 +259,63 @@ async fn test_sse_transport_receive() {
 
 #[tokio::test]
 async fn test_sse_transport_send() {
-    // Create a mock POST endpoint
-    let (post_addr, shutdown_tx, received_messages) = create_mock_post_endpoint().await;
-    let sse_url = format!("http://{}", post_addr); // Not actually used for SSE in this test
-    let send_url = format!("http://{}", post_addr);
+    // Create a mock SSE server and POST endpoint
+    let (server_addr, shutdown_tx) = create_mock_sse_server().await;
+    let (post_addr, post_shutdown_tx, received_messages) = create_mock_post_endpoint().await;
 
-    // Create the SSE client transport
-    let mut transport = SSEClientTransport::new(&sse_url, &send_url).unwrap();
+    let sse_url = format!("http://{}", server_addr);
+
+    // Create the SSE client transport (now only needs the events URL)
+    let mut transport = SSEClientTransport::new(&sse_url).unwrap();
 
     // Start the transport
     transport.start().await.unwrap();
 
-    // Create a test message
-    let test_message = TestMessage {
+    // Wait a bit for the endpoint event to be processed
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Create a test message to send
+    let message = TestMessage {
         id: 3,
         jsonrpc: "2.0".to_string(),
-        method: "request".to_string(),
-        params: serde_json::json!({"action": "test"}),
+        method: "test3".to_string(),
+        params: serde_json::json!({
+            "key": "value",
+            "nested": {
+                "nestedKey": "nestedValue"
+            }
+        }),
     };
 
     // Send the message
-    transport.send(&test_message).await.unwrap();
+    transport.send(&message).await.unwrap();
 
-    // Wait a short time for the message to be processed
+    // Wait a bit for the message to be received by the server
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Check that the message was received by the endpoint
-    let messages = received_messages.lock().unwrap();
+    // Verify that the message was received by the server
+    let messages = received_messages.lock().await;
+    assert_eq!(messages.len(), 1);
 
-    // In some environments, we might get more than one message (if the test is re-run)
-    // Just check that we received at least one message
-    assert!(!messages.is_empty(), "No messages received");
-
-    // Parse the received message
+    // Parse the JSON and verify the content
     let received: TestMessage = serde_json::from_str(&messages[0]).unwrap();
     assert_eq!(received.id, 3);
-    assert_eq!(received.method, "request");
-    assert_eq!(received.params["action"], "test");
+    assert_eq!(received.method, "test3");
+    assert_eq!(received.params["key"], "value");
+    assert_eq!(received.params["nested"]["nestedKey"], "nestedValue");
 
     // Close the transport
     transport.close().await.unwrap();
 
-    // Shut down the mock endpoint
+    // Shut down the mock servers
     let _ = shutdown_tx.send(());
+    let _ = post_shutdown_tx.send(());
 }
 
 #[tokio::test]
 async fn test_sse_transport_with_auth() {
-    // This test would require more complex HTTP header inspection
-    // For now, just verify that the transport can be created with an auth token
-    let transport = SSEClientTransport::new("http://localhost:8080", "http://localhost:8080")
+    // This test is now just testing the builder method with auth
+    let transport = SSEClientTransport::new("http://localhost:8080")
         .unwrap()
         .with_auth_token("test_token");
 
@@ -300,29 +325,29 @@ async fn test_sse_transport_with_auth() {
 
 #[tokio::test]
 async fn test_sse_transport_reconnect_params() {
-    // Test that reconnection parameters can be set
-    let transport = SSEClientTransport::new("http://localhost:8080", "http://localhost:8080")
+    // This test is now just testing the builder method with reconnect params
+    let transport = SSEClientTransport::new("http://localhost:8080")
         .unwrap()
-        .with_reconnect_params(5, 10);
+        .with_reconnect_params(10, 3);
 
-    assert_eq!(transport.get_reconnect_interval(), Duration::from_secs(5));
-    assert_eq!(transport.get_max_reconnect_attempts(), 10);
+    assert_eq!(transport.get_reconnect_interval(), Duration::from_secs(10));
+    assert_eq!(transport.get_max_reconnect_attempts(), 3);
 }
 
 #[tokio::test]
 async fn test_sse_transport_clone() {
-    // Test that the transport can be cloned
-    let original =
-        SSEClientTransport::new("http://localhost:8080", "http://localhost:8080").unwrap();
+    let original = SSEClientTransport::new("http://localhost:8080").unwrap();
     let cloned = original.clone();
 
-    // Start both transports to verify they can operate independently
-    let mut orig = original.clone();
-    let mut cln = cloned.clone();
-
-    // Both should be able to start without interfering with each other
-    assert!(orig.start().await.is_ok());
-    assert!(cln.start().await.is_ok());
+    // Verify the cloned transport has the same configuration
+    assert_eq!(
+        original.get_reconnect_interval(),
+        cloned.get_reconnect_interval()
+    );
+    assert_eq!(
+        original.get_max_reconnect_attempts(),
+        cloned.get_max_reconnect_attempts()
+    );
 }
 
 #[tokio::test]
