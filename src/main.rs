@@ -147,12 +147,11 @@ async fn main() -> Result<(), MCPError> {
                 "Generating server stub with name '{}' to '{}'",
                 name, output
             );
-            let _output_path = PathBuf::from(output.clone());
+            let output_path = PathBuf::from(output.clone());
 
-            // TODO: Generate server stub
-            Err(MCPError::UnsupportedFeature(
-                "Server stub generation not yet implemented".to_string(),
-            ))
+            // Generate server using the generator module
+            mcpr::generator::generate_server(&name, &output_path)
+                .map_err(|e| MCPError::Transport(format!("Failed to generate server: {}", e)))
         }
         Cli::GenerateClient {
             name,
@@ -163,12 +162,11 @@ async fn main() -> Result<(), MCPError> {
                 "Generating client stub with name '{}' to '{}'",
                 name, output
             );
-            let _output_path = PathBuf::from(output.clone());
+            let output_path = PathBuf::from(output.clone());
 
-            // TODO: Generate client stub
-            Err(MCPError::UnsupportedFeature(
-                "Client stub generation not yet implemented".to_string(),
-            ))
+            // Generate client using the generator module
+            mcpr::generator::generate_client(&name, &output_path)
+                .map_err(|e| MCPError::Transport(format!("Failed to generate client: {}", e)))
         }
         Cli::GenerateProject {
             name,
@@ -179,12 +177,10 @@ async fn main() -> Result<(), MCPError> {
                 "Generating project '{}' in '{}' with transport '{}'",
                 name, output, transport
             );
-            let _output_path = PathBuf::from(output.clone());
 
-            // TODO: Generate project
-            Err(MCPError::UnsupportedFeature(
-                "Project generation not yet implemented".to_string(),
-            ))
+            // Generate project using the generator module
+            mcpr::generator::generate_project(&name, &output, &transport)
+                .map_err(|e| MCPError::Transport(format!("Failed to generate project: {}", e)))
         }
         Cli::RunServer {
             port,
