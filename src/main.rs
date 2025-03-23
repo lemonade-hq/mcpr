@@ -309,8 +309,9 @@ async fn run_client(cmd: Connect) -> Result<(), MCPError> {
     match cmd.transport.as_str() {
         "sse" => {
             info!("Using SSE transport with URI: {}", cmd.uri);
-            // For SSE transport, the same URL is used for both event source and sending messages
-            let transport = SSEClientTransport::new(&cmd.uri, &cmd.uri)
+            // For SSE transport, we now only need to provide the events URL
+            // The messages URL will be dynamically received from the server via an "endpoint" event
+            let transport = SSEClientTransport::new(&cmd.uri)
                 .map_err(|e| MCPError::Transport(format!("Failed to create SSE client: {}", e)))?;
             let mut client = Client::new(transport);
             handle_client_session(&mut client, cmd).await

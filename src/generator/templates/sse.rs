@@ -460,7 +460,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create a transport
     let server_url = args.uri.clone();
     info!("Connecting to server: {}", server_url);
-    let transport = SSEClientTransport::new(&server_url, &server_url)?;
+    let transport = SSEClientTransport::new(&server_url)?;
     
     // Create a client
     let mut client = Client::new(transport);

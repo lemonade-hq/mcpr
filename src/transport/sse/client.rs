@@ -3,7 +3,7 @@ use crate::error::MCPError;
 use crate::transport::{CloseCallback, ErrorCallback, MessageCallback, Transport};
 use async_trait::async_trait;
 use futures::stream::StreamExt;
-use log::warn;
+use log::{debug, warn};
 use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,8 +16,8 @@ pub struct SSEClientTransport {
     /// The URL for SSE events
     url: Url,
 
-    /// The URL for sending requests
-    send_url: Url,
+    /// The URL for sending requests (dynamically received from server)
+    send_url: Arc<Mutex<Option<Url>>>,
 
     /// Authentication token for requests
     auth_token: Option<String>,
@@ -55,12 +55,12 @@ pub struct SSEClientTransport {
 
 impl SSEClientTransport {
     /// Create a new SSE transport in client mode
-    pub fn new(event_source_url: &str, send_url: &str) -> Result<Self, MCPError> {
+    ///
+    /// Only requires the event source URL. The send URL will be dynamically
+    /// provided by the server via an "endpoint" SSE event according to the MCP protocol.
+    pub fn new(event_source_url: &str) -> Result<Self, MCPError> {
         let url = Url::parse(event_source_url)
             .map_err(|e| MCPError::Transport(format!("Invalid event source URL: {}", e)))?;
-
-        let send_url = Url::parse(send_url)
-            .map_err(|e| MCPError::Transport(format!("Invalid send URL: {}", e)))?;
 
         // Create a channel for receiving messages
         let (message_tx, message_rx) = mpsc::channel::<String>(100);
@@ -69,7 +69,7 @@ impl SSEClientTransport {
 
         Ok(Self {
             url,
-            send_url,
+            send_url: Arc::new(Mutex::new(None)),
             auth_token: None,
             reconnect_interval: Duration::from_secs(3), // Default 3 seconds
             max_reconnect_attempts: 5,                  // Default 5 attempts
@@ -105,6 +105,7 @@ impl SSEClientTransport {
 
         // Clone necessary data for the client task
         let url = self.url.clone();
+        let send_url_mutex = self.send_url.clone();
         let message_sender = self.message_sender.clone();
         let received_messages = self.received_messages.clone();
         let auth_token = self.auth_token.clone();
@@ -176,20 +177,48 @@ impl SSEClientTransport {
                                     let event = buffer[..pos + 2].to_string();
                                     buffer = buffer[pos + 2..].to_string();
 
-                                    // Extract data from the event
-                                    if let Some(data_line) =
-                                        event.lines().find(|line| line.starts_with("data:"))
-                                    {
-                                        let data = data_line[5..].trim().to_string();
+                                    // Extract event type and data
+                                    let mut event_type = "message"; // Default event type
+                                    let mut event_data = String::new();
 
-                                        // Store the message
-                                        {
-                                            let mut messages = received_messages.lock().await;
-                                            messages.push(data.clone());
+                                    for line in event.lines() {
+                                        if line.starts_with("event:") {
+                                            event_type = line[6..].trim();
+                                        } else if line.starts_with("data:") {
+                                            event_data = line[5..].trim().to_string();
                                         }
+                                    }
 
-                                        // Send the message to the channel
-                                        let _ = message_sender.send(data.clone()).await;
+                                    // Handle different event types
+                                    match event_type {
+                                        "endpoint" => {
+                                            // Update the send URL from the endpoint event
+                                            if let Ok(endpoint_url) = Url::parse(&event_data) {
+                                                let mut send_url = send_url_mutex.lock().await;
+                                                *send_url = Some(endpoint_url);
+                                                debug!("Received endpoint URL: {}", event_data);
+                                            } else {
+                                                eprintln!(
+                                                    "Received invalid endpoint URL: {}",
+                                                    event_data
+                                                );
+                                            }
+                                        }
+                                        "message" => {
+                                            // Process message event
+                                            // Store the message
+                                            {
+                                                let mut messages = received_messages.lock().await;
+                                                messages.push(event_data.clone());
+                                            }
+
+                                            // Send the message to the channel
+                                            let _ = message_sender.send(event_data.clone()).await;
+                                        }
+                                        _ => {
+                                            // Ignore unknown event types
+                                            debug!("Received unknown event type: {}", event_type);
+                                        }
                                     }
                                 }
                             }
@@ -259,6 +288,21 @@ impl Transport for SSEClientTransport {
             return Err(error);
         }
 
+        // Get the send URL from the mutex
+        let send_url = {
+            let send_url_guard = self.send_url.lock().await;
+            match &*send_url_guard {
+                Some(url) => url.clone(),
+                None => {
+                    let error = MCPError::Transport(
+                        "No send URL available. Waiting for endpoint event from server".to_string(),
+                    );
+                    self.handle_error(&error);
+                    return Err(error);
+                }
+            }
+        };
+
         // Serialize message to JSON
         let json = serde_json::to_string(message).map_err(|e| {
             let error = MCPError::Serialization(e.to_string());
@@ -268,7 +312,7 @@ impl Transport for SSEClientTransport {
 
         // Create a reqwest client
         let client = reqwest::Client::new();
-        let mut request = client.post(self.send_url.clone());
+        let mut request = client.post(send_url);
 
         // Add authorization header if auth token is set
         if let Some(token) = &self.auth_token {
@@ -348,6 +392,7 @@ impl Transport for SSEClientTransport {
             let _ = handle.abort();
         }
 
+        // Call the close callback if set
         if let Some(callback) = &self.on_close {
             callback();
         }
@@ -371,25 +416,19 @@ impl Transport for SSEClientTransport {
     }
 }
 
-// For testing auth token handling
-#[cfg(test)]
 impl SSEClientTransport {
-    // Test helper to check if auth token is set
     pub fn has_auth_token(&self) -> bool {
         self.auth_token.is_some()
     }
 
-    // Test helper to get the auth token
     pub fn get_auth_token(&self) -> Option<&str> {
         self.auth_token.as_deref()
     }
 
-    // Test helper to get reconnect interval
     pub fn get_reconnect_interval(&self) -> Duration {
         self.reconnect_interval
     }
 
-    // Test helper to get max reconnect attempts
     pub fn get_max_reconnect_attempts(&self) -> u32 {
         self.max_reconnect_attempts
     }
