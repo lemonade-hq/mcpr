@@ -20,6 +20,8 @@ Cargo.lock
 *.swp
 *.swo
 
+ai-plans/
+
 # macOS files
 .DS_Store
 

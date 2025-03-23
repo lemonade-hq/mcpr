@@ -54,6 +54,10 @@ tokio-tungstenite = "0.20" # Added for WebSocket async support
 chrono = "0.4" # For timestamp handling in examples
 tokio-util = { version = "0.7", features = ["io"] } # For SSE E2E tests
 uuid = { version = "1.16.0", features = ["v4"] }
+warp = "0.3" # Added for HTTP server handling with simplified API
+eventsource-stream = "0.2" # Added for SSE client stream processing
+async-stream = "0.3" # Added for creating async streams in tests
+bytes = "1.5" # Added for byte buffers in SSE streaming
 
 # Optional dependencies that are only used by specific features
 [dev-dependencies]

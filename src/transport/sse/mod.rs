@@ -2,6 +2,7 @@
 mod client;
 mod server;
 mod session;
+mod sse_stream;
 
 pub use client::SSEClientTransport;
 pub use server::SSEServerTransport;

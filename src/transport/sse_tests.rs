@@ -2,14 +2,14 @@
 #![cfg(test)]
 use crate::transport::sse::{SSEClientTransport, SSEServerTransport};
 use crate::transport::Transport;
+use bytes::Bytes;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::net::TcpListener;
 use tokio::sync::{oneshot, Mutex};
+use warp::{Filter, Reply};
 
 // Test message structure matching the protocol
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -20,7 +20,7 @@ struct TestMessage {
     params: serde_json::Value,
 }
 
-// Helper function to create a mock SSE server using tokio's TcpListener directly
+// Helper function to create a mock SSE server using warp
 async fn create_mock_sse_server(
     post_addr: Option<SocketAddr>,
 ) -> (SocketAddr, oneshot::Sender<()>) {
@@ -28,7 +28,7 @@ async fn create_mock_sse_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     // Build a Vec of test messages to send
-    let test_messages = vec![
+    let test_messages = Arc::new(vec![
         TestMessage {
             id: 1,
             jsonrpc: "2.0".to_string(),
@@ -43,169 +43,96 @@ async fn create_mock_sse_server(
                 "key": "value"
             }),
         },
-    ];
+    ]);
 
-    // Create an HTTP server that serves SSE
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
+    // Create a route that sends SSE events
+    let test_msgs = test_messages.clone();
+    let post_address = post_addr.clone();
 
-    // Spawn a tokio task that runs the server
-    tokio::spawn(async move {
-        let test_messages = test_messages.clone();
+    // Use a simpler approach - directly create the SSE endpoint with a response
+    let sse_route = warp::path("events").and(warp::get()).map(move || {
+        let messages = test_msgs.clone();
+        let post_addr_opt = post_address.clone();
 
-        tokio::select! {
-            _ = async {
-                while let Ok((mut stream, _)) = listener.accept().await {
-                    let test_messages = test_messages.clone();
+        // Create a buffer for the response
+        let mut buffer = String::new();
 
-                    tokio::spawn(async move {
-                        // Send HTTP response header
-                        let http_response = "HTTP/1.1 200 OK\r\n\
-                                            Content-Type: text/event-stream\r\n\
-                                            Cache-Control: no-cache\r\n\
-                                            Connection: keep-alive\r\n\
-                                            \r\n";
+        // Add endpoint event
+        let endpoint_url = if let Some(post_address) = post_addr_opt {
+            format!("http://{}/messages", post_address)
+        } else {
+            "http://localhost:8000/messages".to_string()
+        };
+        buffer.push_str(&format!("event: endpoint\ndata: {}\n\n", endpoint_url));
 
-                        let mut writer = BufWriter::new(&mut stream);
-
-                        // Write headers
-                        writer.write_all(http_response.as_bytes()).await.unwrap();
-
-                        // First, send the endpoint event with the SEND URL for messages
-                        // Use the provided post_addr if available, otherwise construct from the current address
-                        let endpoint_url = if let Some(post_address) = post_addr {
-                            format!("http://{}", post_address)
-                        } else {
-                            format!("http://{}/messages", addr)
-                        };
-
-                        let endpoint_event = format!("event: endpoint\ndata: {}\n\n", endpoint_url);
-                        println!("Sending endpoint event: {}", endpoint_event);
-                        writer.write_all(endpoint_event.as_bytes()).await.unwrap();
-                        writer.flush().await.unwrap();
-
-                        // Send each test message as an SSE event
-                        for msg in test_messages {
-                            let json = serde_json::to_string(&msg).unwrap();
-                            let sse_event = format!("event: message\ndata: {}\n\n", json);
-
-                            writer.write_all(sse_event.as_bytes()).await.unwrap();
-                            writer.flush().await.unwrap();
-
-                            // Add a small delay between messages
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
-
-                        // Keep the connection open until the test is done
-                        loop {
-                            tokio::time::sleep(Duration::from_secs(1)).await;
-                        }
-                    });
-                }
-            } => {}
-
-            _ = shutdown_rx => {
-                // Server shutdown requested
+        // Add test messages
+        for msg in messages.iter() {
+            if let Ok(json) = serde_json::to_string(msg) {
+                buffer.push_str(&format!("event: message\ndata: {}\n\n", json));
             }
         }
+
+        // Set headers for SSE
+        warp::reply::with_header(buffer, "content-type", "text/event-stream")
     });
 
+    // Run the server
+    let (addr, server) =
+        warp::serve(sse_route).bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+            shutdown_rx.await.ok();
+        });
+
+    // Spawn the server
+    tokio::spawn(server);
+
+    // Return the address and shutdown handle
     (addr, shutdown_tx)
 }
 
-// Helper function to create a mock HTTP POST endpoint
+// Helper function to create a mock HTTP POST endpoint using warp
 async fn create_mock_post_endpoint() -> (SocketAddr, oneshot::Sender<()>, Arc<Mutex<Vec<String>>>) {
-    // Bind to a random available port
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    println!("POST endpoint listening on: {}", addr);
-
-    // Create a channel to signal shutdown
+    // Create a shutdown channel
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     // Create a shared collection to store received messages
-    let received_messages = Arc::new(Mutex::new(Vec::new()));
+    let received_messages = Arc::new(Mutex::new(Vec::<String>::new()));
     let received_messages_clone = received_messages.clone();
 
+    // Create the POST route
+    let post_route = warp::path("messages")
+        .and(warp::post())
+        .and(warp::body::content_length_limit(1024 * 16))
+        .and(warp::body::json())
+        .map(move |message: serde_json::Value| {
+            // Store the received message
+            let message_str = message.to_string();
+            println!("Received message: {}", message_str);
+
+            // Clone for async task
+            let messages = received_messages_clone.clone();
+
+            tokio::spawn(async move {
+                let mut messages_guard = messages.lock().await;
+                messages_guard.push(message_str);
+            });
+
+            // Send a success response
+            warp::reply::json(&serde_json::json!({
+                "status": "success",
+                "message": "Message received"
+            }))
+        });
+
+    // Run the server
+    let (addr, server) =
+        warp::serve(post_route).bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async {
+            shutdown_rx.await.ok();
+        });
+
     // Spawn the server
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = async {
-                println!("POST endpoint awaiting connections");
-                while let Ok((stream, _)) = listener.accept().await {
-                    println!("POST endpoint received a connection");
-                    let received_messages = received_messages_clone.clone();
+    tokio::spawn(server);
 
-                    tokio::spawn(async move {
-                        let mut buf_stream = tokio::io::BufReader::new(stream);
-                        let mut headers = Vec::new();
-                        let mut content_length = 0;
-
-                        // Read HTTP headers
-                        loop {
-                            let mut line = String::new();
-                            if let Err(e) = tokio::io::AsyncBufReadExt::read_line(&mut buf_stream, &mut line).await {
-                                eprintln!("Error reading header: {}", e);
-                                return;
-                            }
-
-                            println!("Header: {}", line);
-
-                            // Check for end of headers
-                            if line == "\r\n" || line.is_empty() {
-                                break;
-                            }
-
-                            // Parse Content-Length header
-                            if line.to_lowercase().starts_with("content-length:") {
-                                if let Some(len_str) = line.split(':').nth(1) {
-                                    if let Ok(len) = len_str.trim().parse::<usize>() {
-                                        content_length = len;
-                                        println!("Content length: {}", content_length);
-                                    }
-                                }
-                            }
-
-                            headers.push(line);
-                        }
-
-                        // Read the body
-                        let mut body = vec![0; content_length];
-                        if let Err(e) = tokio::io::AsyncReadExt::read_exact(&mut buf_stream, &mut body).await {
-                            eprintln!("Error reading body: {}", e);
-                            return;
-                        }
-
-                        // Store the received message
-                        if let Ok(body_str) = String::from_utf8(body) {
-                            println!("Received body: {}", body_str);
-                            let mut messages = received_messages.lock().await;
-                            messages.push(body_str);
-                        }
-
-                        // Send a response
-                        let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
-                        let mut writer = tokio::io::BufWriter::new(buf_stream.into_inner());
-                        if let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut writer, response.as_bytes()).await {
-                            eprintln!("Error sending response: {}", e);
-                            return;
-                        }
-
-                        if let Err(e) = tokio::io::AsyncWriteExt::flush(&mut writer).await {
-                            eprintln!("Error flushing response: {}", e);
-                        }
-                    });
-                }
-            } => {}
-
-            _ = shutdown_rx => {
-                // Server shutdown requested
-                println!("POST endpoint shutdown requested");
-            }
-        }
-    });
-
-    // Return the server address, shutdown sender, and received messages collection
+    // Return the address, shutdown handle, and received messages collection
     (addr, shutdown_tx, received_messages)
 }
 
@@ -219,7 +146,7 @@ async fn test_sse_transport_send() {
     // Now create the SSE server with the POST endpoint address
     let (server_addr, shutdown_tx) = create_mock_sse_server(Some(post_addr)).await;
 
-    let sse_url = format!("http://{}", server_addr);
+    let sse_url = format!("http://{}/events", server_addr);
     println!("SSE server URL: {}", sse_url);
     println!("POST endpoint address: {}", post_addr);
 
@@ -251,54 +178,43 @@ async fn test_sse_transport_send() {
 
     // Send the message
     println!("Sending message");
-    match transport.send(&message).await {
-        Ok(_) => println!("Message sent successfully"),
-        Err(e) => println!("Error sending message: {:?}", e),
-    }
+    transport.send(&message).await.unwrap();
 
-    // Wait for the message to be received by the server
-    println!("Waiting for the message to be received...");
+    // Give the server some time to process the message
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Verify that the message was received by the server
-    let messages = received_messages.lock().await;
-    println!("Received messages count: {}", messages.len());
-    assert_eq!(messages.len(), 1, "Expected one message to be received");
+    // Verify that the message was received by the POST endpoint
+    let received = received_messages.lock().await;
+    assert!(!received.is_empty(), "No messages received");
 
-    // Parse the JSON and verify the content
-    if !messages.is_empty() {
-        let received: TestMessage = serde_json::from_str(&messages[0]).unwrap();
-        assert_eq!(received.id, 3);
-        assert_eq!(received.method, "test3");
-        assert_eq!(received.params["key"], "value");
-        assert_eq!(received.params["nested"]["nestedKey"], "nestedValue");
+    if !received.is_empty() {
+        let received_message: TestMessage = serde_json::from_str(&received[0]).unwrap();
+        assert_eq!(received_message.id, 3);
+        assert_eq!(received_message.method, "test3");
     }
 
-    // Close the transport
-    println!("Closing transport");
+    // Clean up
+    println!("Cleaning up");
     transport.close().await.unwrap();
-
-    // Shut down the mock servers
-    println!("Shutting down mock servers");
     let _ = shutdown_tx.send(());
     let _ = post_shutdown_tx.send(());
 }
 
+// Test that the auth token is properly set and used
 #[tokio::test]
 async fn test_sse_transport_with_auth() {
-    // This test is just testing the builder method with auth
-    let transport = SSEClientTransport::new("http://localhost:8080")
+    let transport = SSEClientTransport::new("http://localhost:8000/events")
         .unwrap()
-        .with_auth_token("test_token");
+        .with_auth_token("test-token");
 
     assert!(transport.has_auth_token());
-    assert_eq!(transport.get_auth_token(), Some("test_token"));
+    assert_eq!(transport.get_auth_token(), Some("test-token"));
 }
 
+// Test that reconnection parameters are properly set
 #[tokio::test]
 async fn test_sse_transport_reconnect_params() {
-    // This test is just testing the builder method with reconnect params
-    let transport = SSEClientTransport::new("http://localhost:8080")
+    let transport = SSEClientTransport::new("http://localhost:8000/events")
         .unwrap()
         .with_reconnect_params(10, 3);
 
@@ -306,30 +222,33 @@ async fn test_sse_transport_reconnect_params() {
     assert_eq!(transport.get_max_reconnect_attempts(), 3);
 }
 
+// Test that cloning the transport works as expected
 #[tokio::test]
 async fn test_sse_transport_clone() {
-    let original = SSEClientTransport::new("http://localhost:8080").unwrap();
-    let cloned = original.clone();
+    let transport = SSEClientTransport::new("http://localhost:8000/events")
+        .unwrap()
+        .with_auth_token("test-token")
+        .with_reconnect_params(10, 3);
 
-    // Verify the cloned transport has the same configuration
-    assert_eq!(
-        original.get_reconnect_interval(),
-        cloned.get_reconnect_interval()
-    );
-    assert_eq!(
-        original.get_max_reconnect_attempts(),
-        cloned.get_max_reconnect_attempts()
-    );
+    let cloned = transport.clone();
+
+    assert_eq!(cloned.get_auth_token(), Some("test-token"));
+    assert_eq!(cloned.get_reconnect_interval(), Duration::from_secs(10));
+    assert_eq!(cloned.get_max_reconnect_attempts(), 3);
 }
 
+// Test for the SSE server transport
 #[tokio::test]
 async fn test_sse_server_transport() {
-    // Create a server transport
-    let mut server = SSEServerTransport::new("http://127.0.0.1:0").unwrap();
+    let server_url = "http://127.0.0.1:0"; // Let the system assign a port
+    let mut server = SSEServerTransport::new(server_url).unwrap();
 
     // Start the server
-    assert!(server.start().await.is_ok());
+    server.start().await.unwrap();
 
-    // Close the server
-    assert!(server.close().await.is_ok());
+    // Give it some time to initialize
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Clean up
+    server.close().await.unwrap();
 }

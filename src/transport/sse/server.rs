@@ -3,12 +3,16 @@ use crate::transport::sse::session::SessionManager;
 use crate::transport::{CloseCallback, ErrorCallback, MessageCallback, Transport};
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Serialize};
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 use url::Url;
+use uuid::Uuid;
+use warp::Filter;
+
+use super::sse_stream::SseEventStream;
 
 /// Server-Sent Events (SSE) Server Transport
 pub struct SSEServerTransport {
@@ -99,91 +103,66 @@ impl SSEServerTransport {
             .parse::<SocketAddr>()
             .map_err(|e| MCPError::Transport(format!("Invalid address: {}", e)))?;
 
-        // Create a TcpListener
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|e| MCPError::Transport(format!("Failed to bind to address: {}", e)))?;
-
         // Create a channel for shutdown signaling
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         self.server_shutdown_tx = Some(shutdown_tx);
 
-        // Clone for the server task
+        // Clone necessary data for the server task
         let session_manager = self.session_manager.clone();
         let received_messages = self.received_messages.clone();
         let message_sender = self.message_sender.clone();
 
-        // Spawn the server task
+        // Create SSE route for events
+        let sse_session_manager = session_manager.clone();
+        let sse_route = warp::path("events")
+            .and(warp::get())
+            .and(warp::query::<SessionQuery>())
+            .map(move |query: SessionQuery| {
+                let session_mgr = sse_session_manager.clone();
+                let session_id = query
+                    .session_id
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+                // Create response with SSE stream
+                warp::reply::with_header(
+                    warp::reply::Response::new(warp::hyper::Body::wrap_stream(
+                        SseEventStream::new(session_mgr, session_id),
+                    )),
+                    "content-type",
+                    "text/event-stream",
+                )
+            });
+
+        // Create messages route for client -> server communication
+        let messages_session_manager = session_manager.clone();
+        let messages_route = warp::path("messages")
+            .and(warp::post())
+            .and(warp::query::<SessionQuery>())
+            .and(warp::body::content_length_limit(1024 * 16))
+            .and(warp::body::json())
+            .and(with_data(received_messages.clone()))
+            .and(with_data(message_sender.clone()))
+            .and(with_data(messages_session_manager.clone()))
+            .and_then(handle_message);
+
+        // Combine routes with CORS support
+        let routes = sse_route
+            .with(warp::cors().allow_any_origin())
+            .or(messages_route);
+
+        // Start the server
+        let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(addr, async move {
+            let _ = shutdown_rx.recv().await;
+            println!("SSE server shutting down");
+        });
+
+        // Spawn the server as a separate task
         let handle = tokio::spawn(async move {
             println!("SSE server listening on http://{}", addr);
             println!("Endpoints:");
             println!("  - GET  http://{}/events   (SSE events stream)", addr);
             println!("  - POST http://{}/messages (Message endpoint)", addr);
-
-            // Accept connections until shutdown
-            loop {
-                tokio::select! {
-                    result = listener.accept() => {
-                        match result {
-                            Ok((stream, _)) => {
-                                let session_mgr = session_manager.clone();
-                                let messages = received_messages.clone();
-                                let task_message_tx = message_sender.clone();
-
-                                tokio::spawn(async move {
-                                    // Peek to determine request type
-                                    let mut stream = stream;
-                                    let mut peek_buffer = [0; 128];
-                                    let n = match stream.peek(&mut peek_buffer).await {
-                                        Ok(n) => n,
-                                        Err(_) => return,
-                                    };
-
-                                    let peek_str = String::from_utf8_lossy(&peek_buffer[..n]);
-
-                                    // Extract host header for constructing the message endpoint URL
-                                    let mut host = "localhost";
-                                    if let Some(host_pos) = peek_str.to_lowercase().find("\r\nhost:") {
-                                        let host_line = &peek_str[host_pos + 7..];
-                                        if let Some(end_pos) = host_line.find("\r\n") {
-                                            host = host_line[..end_pos].trim();
-                                        }
-                                    }
-
-                                    // Extract session ID from query parameters
-                                    let mut session_id = None;
-                                    if peek_str.to_lowercase().contains("sessionid=") {
-                                        if let Some(session_pos) = peek_str.find("sessionId=") {
-                                            let session_part = &peek_str[session_pos + 10..];
-                                            if let Some(end_pos) = session_part.find(|c: char| c == '&' || c == ' ' || c == '\r') {
-                                                session_id = Some(session_part[..end_pos].to_string());
-                                            }
-                                        }
-                                    }
-
-                                    // Handle based on request type
-                                    if peek_str.starts_with("GET") {
-                                        // Handle SSE connection
-                                        let _ = session_mgr.handle_sse_connection(stream, host).await;
-                                    } else if peek_str.starts_with("POST") {
-                                        // Handle POST request
-                                        let _ = session_mgr.handle_post_request(stream, messages, task_message_tx, session_id).await;
-                                    } else {
-                                        // Unknown method - 405 Method Not Allowed
-                                        let response = "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 18\r\n\r\nMethod Not Allowed";
-                                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
-                                    }
-                                });
-                            }
-                            Err(e) => eprintln!("Error accepting connection: {}", e),
-                        }
-                    }
-                    _ = shutdown_rx.recv() => {
-                        println!("SSE server shutting down");
-                        break;
-                    }
-                }
-            }
+            server.await;
         });
 
         self.server_handle = Some(handle);
@@ -263,14 +242,14 @@ impl Clone for SSEServerTransport {
             url: self.url.clone(),
             is_connected: self.is_connected,
             sender_tx: self.sender_tx.clone(),
-            on_close: None, // Callbacks cannot be cloned
-            on_error: None,
-            on_message: None,
-            server_handle: None, // Server handle cannot be cloned
-            session_manager: SessionManager::new(self.session_manager.broadcaster()),
-            server_shutdown_tx: self.server_shutdown_tx.clone(),
+            on_close: None,      // Callbacks are not cloned
+            on_error: None,      // Callbacks are not cloned
+            on_message: None,    // Callbacks are not cloned
+            server_handle: None, // The handle is not cloned
+            session_manager: self.session_manager.clone(),
+            server_shutdown_tx: None, // The shutdown channel is not cloned
             received_messages: self.received_messages.clone(),
-            message_rx: None, // Receivers cannot be cloned
+            message_rx: None, // The receiver is not cloned
             message_sender: self.message_sender.clone(),
         }
     }
@@ -279,21 +258,11 @@ impl Clone for SSEServerTransport {
 #[async_trait]
 impl Transport for SSEServerTransport {
     async fn start(&mut self) -> Result<(), MCPError> {
-        if self.is_connected {
-            return Ok(());
-        }
-
         self.start_server().await
     }
 
     async fn send<T: Serialize + Send + Sync>(&mut self, message: &T) -> Result<(), MCPError> {
-        if !self.is_connected {
-            let error = MCPError::Transport("Transport not connected".to_string());
-            self.handle_error(&error);
-            return Err(error);
-        }
-
-        // In server mode, broadcast to all clients
+        // For server, broadcast the message to all clients
         self.broadcast(message).await
     }
 
@@ -304,28 +273,36 @@ impl Transport for SSEServerTransport {
             return Err(error);
         }
 
-        // If we have a receiver, try to get a message
-        if let Some(rx) = &mut self.message_rx {
-            match rx.recv().await {
-                Some(json) => {
-                    // Parse the JSON message
-                    serde_json::from_str(&json).map_err(|e| {
-                        let error = MCPError::Deserialization(e.to_string());
-                        self.handle_error(&error);
-                        error
-                    })
-                }
-                None => {
-                    let error = MCPError::Transport("Message channel closed".to_string());
-                    self.handle_error(&error);
-                    Err(error)
-                }
+        // Get the message receiver
+        let mut message_rx = match self.message_rx.take() {
+            Some(rx) => rx,
+            None => {
+                let error = MCPError::Transport("Message receiver unavailable".to_string());
+                self.handle_error(&error);
+                return Err(error);
             }
-        } else {
-            let error = MCPError::Transport("Message receiver not initialized".to_string());
+        };
+
+        // Wait for a message
+        let json = match message_rx.recv().await {
+            Some(json) => {
+                // Put the receiver back
+                self.message_rx = Some(message_rx);
+                json
+            }
+            None => {
+                let error = MCPError::Transport("Message channel closed".to_string());
+                self.handle_error(&error);
+                return Err(error);
+            }
+        };
+
+        // Parse the message
+        serde_json::from_str(&json).map_err(|e| {
+            let error = MCPError::Deserialization(e.to_string());
             self.handle_error(&error);
-            Err(error)
-        }
+            error
+        })
     }
 
     async fn close(&mut self) -> Result<(), MCPError> {
@@ -333,18 +310,21 @@ impl Transport for SSEServerTransport {
             return Ok(());
         }
 
-        self.is_connected = false;
-
-        // Shutdown the server
+        // Signal server shutdown
         if let Some(tx) = &self.server_shutdown_tx {
             let _ = tx.send(()).await;
         }
 
-        // Wait for the server to shutdown
+        // Wait for server to shut down
         if let Some(handle) = self.server_handle.take() {
             let _ = handle.await;
         }
 
+        // Reset state
+        self.is_connected = false;
+        self.server_shutdown_tx = None;
+
+        // Call the close callback
         if let Some(callback) = &self.on_close {
             callback();
         }
@@ -366,4 +346,50 @@ impl Transport for SSEServerTransport {
     {
         self.on_message = callback.map(|f| Box::new(f) as MessageCallback);
     }
+}
+
+/// Session query struct for SSE connections
+#[derive(Debug, serde::Deserialize)]
+struct SessionQuery {
+    session_id: Option<String>,
+}
+
+/// Handle incoming messages from clients
+async fn handle_message(
+    query: SessionQuery,
+    message: serde_json::Value,
+    messages: Arc<Mutex<Vec<String>>>,
+    message_tx: Arc<mpsc::Sender<String>>,
+    session_manager: SessionManager,
+) -> Result<impl warp::Reply, Infallible> {
+    let session_id = query.session_id;
+
+    // Convert message to string
+    let msg_str = message.to_string();
+
+    // Store the message
+    {
+        let mut store = messages.lock().await;
+        store.push(msg_str.clone());
+    }
+
+    // Send to message channel
+    let _ = message_tx.send(msg_str.clone()).await;
+
+    // If a session ID was provided, try to send to that specific session
+    if let Some(id) = session_id {
+        if session_manager.session_exists(&id).await {
+            let _ = session_manager.send_to_session(&id, &msg_str).await;
+        }
+    }
+
+    Ok(warp::reply::json(&serde_json::json!({
+        "status": "success",
+        "message": "Message received"
+    })))
+}
+
+/// Helper filter to extract data
+fn with_data<T: Clone + Send>(data: T) -> impl Filter<Extract = (T,), Error = Infallible> + Clone {
+    warp::any().map(move || data.clone())
 }
