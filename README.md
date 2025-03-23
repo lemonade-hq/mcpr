@@ -21,10 +21,6 @@ Check out our [GitHub Tools example](examples/github-tools/README.md) for a comp
 - **Project Generator**: Quickly scaffold new MCP projects
 - **Mock Implementations**: Built-in mock transports for testing and development
 
-## Coming Soon
-
-- **WebSocket Transport**: WebSocket transport implementation is planned but not yet implemented
-
 ## Installation
 
 Add MCPR to your `Cargo.toml`:
@@ -277,35 +273,42 @@ Each generated project includes test scripts:
 
 ## Transport Options
 
-MCPR supports multiple transport options:
+MCPR provides multiple transport implementations for different use cases:
 
 ### Stdio Transport
 
-The simplest transport, using standard input/output:
+The stdio transport uses standard input/output for communication, making it ideal for:
 
-```rust
-use mcpr::transport::stdio::StdioTransport;
+- Local client-server pairs running in the same process or as parent-child processes
+- Command-line tools and utilities
+- Testing and development
 
-let transport = StdioTransport::new();
+```bash
+# Run a server that communicates via stdio
+./my-server
+
+# Run a client that connects to the server via stdio
+./my-client | ./my-server
 ```
 
 ### SSE Transport
 
-Server-Sent Events transport for web-based applications:
+The Server-Sent Events (SSE) transport enables HTTP-based communication with server-to-client events:
 
-```rust
-use mcpr::transport::sse::SSETransport;
+- Server listens on HTTP endpoints for client connections and messages
+- Clients connect via SSE for receiving messages and HTTP POST for sending
+- Works across network boundaries and through most firewalls
+- Compatible with web browsers and HTTP clients
 
-// For server
-let transport = SSETransport::new("http://localhost:8080");
+```bash
+# Run a server with SSE transport
+./my-server --transport sse --port 8000
 
-// For client
-let transport = SSETransport::new("http://localhost:8080");
+# Connect a client to the SSE server
+./my-client --uri http://localhost:8000
 ```
 
-### WebSocket Transport (Coming Soon)
-
-WebSocket transport for bidirectional communication is currently under development.
+See [README_SSE_TRANSPORT.md](README_SSE_TRANSPORT.md) for detailed documentation on the SSE transport implementation.
 
 ## Detailed Testing Guide
 

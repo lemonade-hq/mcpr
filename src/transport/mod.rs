@@ -6,7 +6,6 @@
 //! The following transport types are supported:
 //! - Stdio: Standard input/output for local processes
 //! - SSE: Server-Sent Events for server-to-client messages with HTTP POST for client-to-server
-//! - WebSocket: Bidirectional communication over WebSockets
 //!
 //! The transport implementations are now fully async, using tokio for async I/O.
 

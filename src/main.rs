@@ -17,20 +17,18 @@ use mcpr::{
 use std::path::PathBuf;
 
 /// MCP CLI tool for generating server and client stubs
-#[derive(Parser)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
+#[derive(Parser, Debug)]
+#[command(name = "mcpr", about = "MCP CLI tools", version)]
+enum Cli {
     /// Generate a server stub
     GenerateServer {
-        /// Name of the server
+        /// Server name
         #[arg(short, long)]
         name: String,
+
+        /// Transport type to use (stdio, sse)
+        #[arg(short, long, default_value = "stdio")]
+        transport: String,
 
         /// Output directory
         #[arg(short, long, default_value = ".")]
@@ -39,28 +37,32 @@ enum Commands {
 
     /// Generate a client stub
     GenerateClient {
-        /// Name of the client
+        /// Client name
         #[arg(short, long)]
         name: String,
+
+        /// Transport type to use (stdio, sse)
+        #[arg(short, long, default_value = "stdio")]
+        transport: String,
 
         /// Output directory
         #[arg(short, long, default_value = ".")]
         output: String,
     },
 
-    /// Generate a complete "hello mcp" project with both client and server
+    /// Generate a complete MCP project with client and server
     GenerateProject {
-        /// Name of the project
+        /// Project name
         #[arg(short, long)]
         name: String,
+
+        /// Transport type to use (stdio, sse)
+        #[arg(short, long, default_value = "stdio")]
+        transport: String,
 
         /// Output directory
         #[arg(short, long, default_value = ".")]
         output: String,
-
-        /// Transport type to use (stdio, sse, websocket)
-        #[arg(short, long, default_value = "stdio")]
-        transport: String,
     },
 
     /// Run a server
@@ -69,7 +71,7 @@ enum Commands {
         #[arg(short, long, default_value_t = 8080)]
         port: u16,
 
-        /// Transport type to use (stdio, sse, websocket)
+        /// Transport type to use (stdio, sse)
         #[arg(short, long, default_value = "stdio")]
         transport: String,
 
@@ -92,7 +94,7 @@ enum Commands {
         #[arg(short, long, default_value = "Default User")]
         name: String,
 
-        /// Transport type to use (stdio, sse, websocket)
+        /// Transport type to use (stdio, sse)
         #[arg(short, long)]
         transport: String,
 
@@ -135,8 +137,12 @@ async fn main() -> Result<(), MCPError> {
     // Parse command-line arguments
     let cli = Cli::parse();
 
-    match cli.command {
-        Commands::GenerateServer { name, output } => {
+    match cli {
+        Cli::GenerateServer {
+            name,
+            transport,
+            output,
+        } => {
             info!(
                 "Generating server stub with name '{}' to '{}'",
                 name, output
@@ -148,7 +154,11 @@ async fn main() -> Result<(), MCPError> {
                 "Server stub generation not yet implemented".to_string(),
             ))
         }
-        Commands::GenerateClient { name, output } => {
+        Cli::GenerateClient {
+            name,
+            transport,
+            output,
+        } => {
             info!(
                 "Generating client stub with name '{}' to '{}'",
                 name, output
@@ -160,10 +170,10 @@ async fn main() -> Result<(), MCPError> {
                 "Client stub generation not yet implemented".to_string(),
             ))
         }
-        Commands::GenerateProject {
+        Cli::GenerateProject {
             name,
-            output,
             transport,
+            output,
         } => {
             info!(
                 "Generating project '{}' in '{}' with transport '{}'",
@@ -176,12 +186,12 @@ async fn main() -> Result<(), MCPError> {
                 "Project generation not yet implemented".to_string(),
             ))
         }
-        Commands::RunServer {
+        Cli::RunServer {
             port,
             transport,
             debug,
         } => run_server(port, &transport, debug).await,
-        Commands::Connect {
+        Cli::Connect {
             uri,
             interactive,
             name,
@@ -199,7 +209,7 @@ async fn main() -> Result<(), MCPError> {
             })
             .await
         }
-        Commands::Validate { path } => {
+        Cli::Validate { path } => {
             info!("Validating message from '{}'", path);
             // TODO: Implement message validation
             info!("Message validation not yet implemented");
@@ -285,13 +295,6 @@ async fn run_server(port: u16, transport_type: &str, debug: bool) -> Result<(), 
             info!("Starting SSE server on {}", uri);
             server.serve(transport).await
         }
-        "websocket" => {
-            info!("Starting server with WebSocket transport on port {}", port);
-            // TODO: Implement WebSocket server
-            Err(MCPError::UnsupportedFeature(
-                "WebSocket server not yet implemented".to_string(),
-            ))
-        }
         _ => {
             error!("Unsupported transport type: {}", transport_type);
             Err(MCPError::Transport(format!(
@@ -309,10 +312,12 @@ async fn run_client(cmd: Connect) -> Result<(), MCPError> {
     // Handle different transport types directly
     match cmd.transport.as_str() {
         "sse" => {
-            info!("SSE transport is only supported for servers");
-            Err(MCPError::Transport(
-                "SSE transport is only supported for servers".to_string(),
-            ))
+            info!("Using SSE transport with URI: {}", cmd.uri);
+            // For SSE transport, the same URL is used for both event source and sending messages
+            let transport = SSEClientTransport::new(&cmd.uri, &cmd.uri)
+                .map_err(|e| MCPError::Transport(format!("Failed to create SSE client: {}", e)))?;
+            let mut client = Client::new(transport);
+            handle_client_session(&mut client, cmd).await
         }
         "stdio" => {
             info!("Using stdio transport");
